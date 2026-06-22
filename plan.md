@@ -56,7 +56,7 @@ All models are MoE or large dense — use quantized checkpoints, all fit on L40S
 | 2 | North Mini Code | 30B-A3B | Cohere | `CohereLabs/North-Mini-Code-1.0-w4a16` | W4A16 (official) | ~20 GB |
 | 3 | Devstral Small 2 | 24B Dense | Mistral | `mistralai/Devstral-Small-2-24B-Instruct-2512` | BF16 (load as-is) | ~48 GB ⚠️ tight — may need INT8 |
 | 4 | Poolside Laguna XS.2 | 33B-A3B | Poolside | `poolside/Laguna-XS.2-NVFP4` | NVFP4 (official) | ~12 GB |
-| 5 | Gemma4 | 26B-A4B | Google | `google/gemma-4-27b-it` *(verify)* | BF16 or INT4 | TBD |
+| 5 | Gemma4 | 26B-A4B | Google | `google/gemma-4-26B-A4B-it` | BF16 or INT4 | TBD |
 
 ### Inference Engine
 - **vLLM ≥ 0.8** for all models (FP8 + NVFP4 support requires recent version)

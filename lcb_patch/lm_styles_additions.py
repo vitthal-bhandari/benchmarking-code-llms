@@ -62,10 +62,10 @@ ADDITIONS: list[LanguageModel] = [
     # HF model ID TBD — update once confirmed.
     # Placeholder uses LLaMa3 style; may need a dedicated Gemma4 style later.
     LanguageModel(
-        model_name="google/gemma-4-27b-it",   # TODO: verify exact HF ID
-        model_repr="Gemma4-27B-IT",
+        model_name="google/gemma-4-26B-A4B-it",
+        model_repr="Gemma4-26B-A4B-IT",
         model_style=LMStyle.LLaMa3,
         release_date=datetime(2025, 5, 1),
-        link="https://huggingface.co/google/gemma-4-27b-it",
+        link="https://huggingface.co/google/gemma-4-26B-A4B-it",
     ),
 ]

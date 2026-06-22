@@ -48,7 +48,7 @@ MODELS=(
   "CohereLabs/North-Mini-Code-1.0-w4a16"
   "mistralai/Devstral-Small-2-24B-Instruct-2512"
   "poolside/Laguna-XS.2-NVFP4"
-  "google/gemma-4-27b-it"        # TODO: verify HF ID
+  "google/gemma-4-26B-A4B-it"
 )
 
 echo ">>> Starting model pre-warm at $(date)"
@@ -62,7 +62,7 @@ models = [
     "CohereLabs/North-Mini-Code-1.0-w4a16",
     "mistralai/Devstral-Small-2-24B-Instruct-2512",
     "poolside/Laguna-XS.2-NVFP4",
-    "google/gemma-4-27b-it",    # TODO: verify HF ID
+    "google/gemma-4-26B-A4B-it",
 ]
 
 token = os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
