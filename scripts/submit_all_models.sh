@@ -23,7 +23,7 @@ MODELS["qwen36_fp8"]="Qwen/Qwen3.6-35B-A3B-FP8"
 MODELS["north_mini_w4a16"]="CohereLabs/North-Mini-Code-1.0-w4a16"
 MODELS["devstral_small2"]="mistralai/Devstral-Small-2-24B-Instruct-2512"
 MODELS["laguna_xs2_nvfp4"]="poolside/Laguna-XS.2-NVFP4"
-MODELS["gemma4_27b"]="google/gemma-4-27b-it"   # TODO: verify HF ID
+MODELS["gemma4_26b"]="google/gemma-4-26B-A4B-it"
 
 echo "Submitting LCB v6 eval jobs..."
 echo ""
