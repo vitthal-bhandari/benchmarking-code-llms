@@ -25,12 +25,14 @@ source .venv/bin/activate
 echo ">>> Installing LCB dependencies..."
 uv pip install -e .
 
-echo ">>> Installing vLLM (CUDA build)..."
-# vLLM >= 0.8 for FP8 + NVFP4 support on L40S
-uv pip install "vllm>=0.8.0"
+echo ">>> Installing vLLM (CUDA build) via pip --no-cache-dir..."
+# Use pip (not uv pip) to avoid a GPFS cross-path copy failure that hits
+# flashinfer-cubin's extremely long filenames on Hyak's scrubbed filesystem.
+# --no-cache-dir forces pip to extract to a tmp dir and move atomically.
+pip install "vllm>=0.8.0" --no-cache-dir
 
 echo ">>> Installing bitsandbytes (for Devstral INT8 fallback)..."
-uv pip install bitsandbytes
+pip install bitsandbytes --no-cache-dir
 
 echo ">>> Sanity check..."
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"

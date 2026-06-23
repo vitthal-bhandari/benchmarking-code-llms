@@ -19,7 +19,7 @@ ADDITIONS_IMPORT = """
 # ── BEGIN benchmarking-code-llms additions ──
 # Auto-inserted by lcb_patch/apply_patch.py — do not edit manually.
 import sys, os as _os
-_patch_dir = _os.path.join(_os.path.dirname(__file__), '..', '..', '..', 'lcb_patch')
+_patch_dir = _os.path.join(_os.path.dirname(__file__), '..', '..', 'lcb_patch')
 sys.path.insert(0, _os.path.abspath(_patch_dir))
 from lm_styles_additions import ADDITIONS
 LanguageModelList.extend(ADDITIONS)

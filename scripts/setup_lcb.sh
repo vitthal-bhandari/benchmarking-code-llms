@@ -57,7 +57,7 @@ fi
 # Resolve repo root relative to this script (works from any cwd)
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo ">>> Applying lm_styles patch..."
-python "$REPO_ROOT/lcb_patch/apply_patch.py" --lcb-dir "$LCB_DIR"
+python3 "$REPO_ROOT/lcb_patch/apply_patch.py" --lcb-dir "$LCB_DIR"
 
 # ── 5. Create .env for secrets ───────────────────────────────────────────────
 ENV_FILE="$PROJECT_DIR/.env"
@@ -77,7 +77,7 @@ echo "================================================================="
 echo "  NEXT STEP: Install the Python environment inside a GPU session."
 echo "  Run the following:"
 echo ""
-echo "  salloc -A stf -p gpu-l40s -N 1 -c 8 --mem=32G --gpus=1 -t 01:00:00"
+echo "  salloc -A ckpt -p gpu-l40s -N 1 -c 8 --mem=32G --gpus=1 -t 01:00:00"
 echo "  # then inside the allocation:"
 echo "  bash $REPO_ROOT/scripts/install_venv.sh"
 echo "================================================================="
