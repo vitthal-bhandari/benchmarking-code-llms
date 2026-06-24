@@ -51,15 +51,9 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 [ -f "$PROJECT_DIR/.env" ] && source <(grep -v '^#' "$PROJECT_DIR/.env" | sed 's/ *#.*//')
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
 
-# ── Auto-detect quantization ──────────────────────────────────────────────────
-case "$MODEL_NAME" in
-  *FP8*|*fp8*)     QUANTIZATION="fp8" ;;
-  *w4a16*|*W4A16*) QUANTIZATION="gptq" ;;
-  *NVFP4*|*nvfp4*) QUANTIZATION="nvfp4" ;;
-  *AWQ*|*awq*)     QUANTIZATION="awq" ;;
-  *GPTQ*|*gptq*)   QUANTIZATION="gptq" ;;
-  *)               QUANTIZATION="" ;;
-esac
+# Quantization is auto-detected by vLLM from the model's config.json.
+# LCB's main.py has no --quantization flag; use --dtype auto (default).
+QUANTIZATION=""
 
 cd "$LCB_DIR"
 
@@ -104,8 +98,8 @@ EVAL_CMD=(
   --temperature 0
   --tensor_parallel_size 1
   --use_cache
+  --dtype auto
 )
-[ -n "${QUANTIZATION:-}" ] && EVAL_CMD+=(--quantization "$QUANTIZATION")
 
 echo ">>> CMD: ${EVAL_CMD[*]}"
 echo ""

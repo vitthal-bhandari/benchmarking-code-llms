@@ -60,24 +60,16 @@ export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
 # ── Tensor parallel size ──────────────────────────────────────────────────────
 TP="${TENSOR_PARALLEL_SIZE:-1}"
 
-# ── Auto-detect quantization from model name if not set ──────────────────────
-if [ -z "${QUANTIZATION:-}" ]; then
-  case "$MODEL_NAME" in
-    *FP8*|*fp8*)   QUANTIZATION="fp8" ;;
-    *w4a16*|*W4A16*) QUANTIZATION="gptq" ;;
-    *NVFP4*|*nvfp4*) QUANTIZATION="nvfp4" ;;
-    *AWQ*|*awq*)   QUANTIZATION="awq" ;;
-    *GPTQ*|*gptq*) QUANTIZATION="gptq" ;;
-    *)             QUANTIZATION="" ;;
-  esac
-fi
+# Quantization is auto-detected by vLLM from the model's config.json.
+# LCB's main.py has no --quantization flag; --dtype auto handles all formats.
+QUANTIZATION=""
 
 cd "$LCB_DIR"
 
 echo "================================================================="
 echo " LiveCodeBench v6 — Code Generation Eval"
 echo " Model      : $MODEL_NAME"
-echo " Quantization: ${QUANTIZATION:-none (BF16)}"
+echo " Quantization: auto-detected by vLLM from model config"
 echo " TP size     : $TP"
 echo " Job ID      : ${SLURM_JOB_ID:-local}"
 echo " Start       : $(date)"
@@ -104,10 +96,8 @@ EVAL_CMD=(
   --temperature 0
   --tensor_parallel_size "$TP"
   --use_cache
+  --dtype auto
 )
-
-# Append quantization flag if set
-[ -n "${QUANTIZATION:-}" ] && EVAL_CMD+=(--quantization "$QUANTIZATION")
 
 echo ""
 echo ">>> Running: ${EVAL_CMD[*]}"
