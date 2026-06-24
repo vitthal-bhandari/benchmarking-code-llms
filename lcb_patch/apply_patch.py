@@ -23,6 +23,7 @@ _patch_dir = _os.path.join(_os.path.dirname(__file__), '..', '..', 'lcb_patch')
 sys.path.insert(0, _os.path.abspath(_patch_dir))
 from lm_styles_additions import ADDITIONS
 LanguageModelList.extend(ADDITIONS)
+LanguageModelStore.update({lm.model_name: lm for lm in ADDITIONS})
 # ── END benchmarking-code-llms additions ──
 """
 
