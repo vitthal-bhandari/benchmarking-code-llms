@@ -99,6 +99,7 @@ EVAL_CMD=(
   --tensor_parallel_size 1
   --use_cache
   --dtype auto
+  --trust_remote_code
 )
 
 echo ">>> CMD: ${EVAL_CMD[*]}"
