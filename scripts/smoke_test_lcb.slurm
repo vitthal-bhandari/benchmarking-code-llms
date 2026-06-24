@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=lcb_smoke
 #SBATCH --account=stf
-#SBATCH --partition=ckpt
+#SBATCH --partition=ckpt-all
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
+#SBATCH --ntasks-per-node=8
 #SBATCH --mem=64G
-#SBATCH --gpus=1
+#SBATCH --gpus=l40:1
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
