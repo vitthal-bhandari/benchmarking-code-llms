@@ -34,6 +34,9 @@ pip install "vllm>=0.8.0" --no-cache-dir
 echo ">>> Installing bitsandbytes (for Devstral INT8 fallback)..."
 pip install bitsandbytes --no-cache-dir
 
+echo ">>> Upgrading transformers (needed for qwen3_5_moe arch and other new model types)..."
+pip install --upgrade transformers --no-cache-dir
+
 echo ">>> Sanity check..."
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
 python -c "import vllm; print('vLLM:', vllm.__version__)"

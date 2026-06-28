@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=8
 #SBATCH --mem=64G
-#SBATCH --gpus=l40:1
+#SBATCH --gpus=l40s:1
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
@@ -99,6 +99,7 @@ EVAL_CMD=(
   --tensor_parallel_size 1
   --use_cache
   --dtype auto
+  --trust_remote_code
 )
 
 echo ">>> CMD: ${EVAL_CMD[*]}"

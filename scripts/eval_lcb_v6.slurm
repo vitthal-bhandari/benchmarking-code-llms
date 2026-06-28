@@ -97,6 +97,7 @@ EVAL_CMD=(
   --tensor_parallel_size "$TP"
   --use_cache
   --dtype auto
+  --trust_remote_code
 )
 
 echo ""
