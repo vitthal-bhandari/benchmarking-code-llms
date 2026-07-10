@@ -34,12 +34,16 @@ pip install "vllm>=0.8.0" --no-cache-dir
 echo ">>> Installing bitsandbytes (for Devstral INT8 fallback)..."
 pip install bitsandbytes --no-cache-dir
 
-echo ">>> Upgrading transformers (needed for qwen3_5_moe arch and other new model types)..."
-pip install --upgrade transformers --no-cache-dir
+echo ">>> Installing transformers from source (PyPI release lacks qwen3_5_moe and other new archs)..."
+# The latest PyPI transformers does NOT yet recognize qwen3_5_moe (Qwen3.6 FP8).
+# vLLM loads model configs via AutoConfig.from_pretrained, so transformers must
+# know the arch. Install from git; run this AFTER vLLM so it isn't downgraded.
+pip install --upgrade --no-cache-dir "git+https://github.com/huggingface/transformers.git"
 
 echo ">>> Sanity check..."
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
 python -c "import vllm; print('vLLM:', vllm.__version__)"
+python -c "import transformers; print('transformers:', transformers.__version__)"
 python -c "from lcb_runner.lm_styles import LanguageModelStore; print('LCB models registered:', len(LanguageModelStore))"
 
 echo ""
