@@ -19,7 +19,10 @@ export UV_CACHE_DIR="/gscratch/scrubbed/$USER/.cache/uv"
 # LCB recommends Python 3.11
 cd "$LCB_DIR"
 echo ">>> Creating venv with Python 3.11..."
-uv venv --python 3.11
+# --seed installs pip into the venv so the pip-based vLLM/bitsandbytes installs
+# below work (uv venv omits pip by default). The pip route for vLLM is
+# deliberate — it avoids a uv/GPFS flashinfer-cubin copy failure on scrubbed.
+uv venv --python 3.11 --seed
 source .venv/bin/activate
 
 echo ">>> Installing LCB dependencies..."
@@ -38,7 +41,7 @@ echo ">>> Installing transformers from source (PyPI release lacks qwen3_5_moe an
 # The latest PyPI transformers does NOT yet recognize qwen3_5_moe (Qwen3.6 FP8).
 # vLLM loads model configs via AutoConfig.from_pretrained, so transformers must
 # know the arch. Install from git; run this AFTER vLLM so it isn't downgraded.
-pip install --upgrade --no-cache-dir "git+https://github.com/huggingface/transformers.git"
+uv pip install --upgrade --no-cache-dir "git+https://github.com/huggingface/transformers.git"
 
 echo ">>> Sanity check..."
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
