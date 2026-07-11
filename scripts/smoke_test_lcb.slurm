@@ -57,6 +57,11 @@ QUANTIZATION=""
 
 cd "$LCB_DIR"
 
+# Activate the venv directly. Do NOT use `uv run` — it re-syncs the env to the
+# project's pinned deps and reverts our git-source transformers (needed for
+# qwen3_5_moe) back to the release that doesn't recognize the arch.
+source .venv/bin/activate
+
 echo "================================================================="
 echo " LCB SMOKE TEST"
 echo " Model       : $MODEL_NAME"
@@ -70,14 +75,14 @@ echo "================================================================="
 # ── Sanity checks ─────────────────────────────────────────────────────────────
 echo ""
 echo ">>> Sanity checks..."
-uv run python -c "
+python -c "
 import torch
 assert torch.cuda.is_available(), 'No CUDA — wrong partition?'
 print('  CUDA OK:', torch.cuda.get_device_name(0))
 print('  VRAM   :', round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1), 'GB')
 "
 
-uv run python -c "
+python -c "
 from lcb_runner.lm_styles import LanguageModelStore
 model = '$MODEL_NAME'
 assert model in LanguageModelStore, f'Model not registered: {model}. Check lcb_patch.'
@@ -89,7 +94,7 @@ echo ""
 echo ">>> Starting generation + evaluation..."
 
 EVAL_CMD=(
-  uv run python -m lcb_runner.runner.main
+  python -m lcb_runner.runner.main
   --model "$MODEL_NAME"
   --scenario codegeneration
   --evaluate
