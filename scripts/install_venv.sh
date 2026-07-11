@@ -25,6 +25,11 @@ echo ">>> Creating venv with Python 3.11..."
 uv venv --python 3.11 --seed
 source .venv/bin/activate
 
+echo ">>> Pinning transformers to git source in LCB pyproject.toml..."
+# Rewrites LCB's transformers requirement to the git URL so uv never reverts our
+# source build (needed for qwen3_5_moe) on a later `uv run`/`uv sync`. Idempotent.
+python "$PROJECT_DIR/lcb_patch/pin_transformers.py" --lcb-dir "$LCB_DIR"
+
 echo ">>> Installing LCB dependencies..."
 uv pip install -e .
 
