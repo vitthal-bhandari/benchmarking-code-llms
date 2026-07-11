@@ -48,6 +48,13 @@ export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
 export TORCH_HOME="/gscratch/scrubbed/$USER/.cache/torch"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
+# FlashInfer JIT-compiles some kernels at runtime and needs nvcc. Hyak's system
+# CUDA modules only go up to 12.9.1, but our torch build is cu130 — using them
+# would be a toolkit/ABI mismatch. Point at the CUDA 13 nvcc pip already
+# installed inside the venv (nvidia-cuda-nvcc) instead of a system module.
+export CUDA_HOME="$LCB_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
+export PATH="$CUDA_HOME/bin:$PATH"
+
 [ -f "$PROJECT_DIR/.env" ] && source <(grep -v '^#' "$PROJECT_DIR/.env" | sed 's/ *#.*//')
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
 
