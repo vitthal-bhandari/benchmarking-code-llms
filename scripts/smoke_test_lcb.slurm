@@ -69,6 +69,10 @@ cd "$LCB_DIR"
 # qwen3_5_moe) back to the release that doesn't recognize the arch.
 source .venv/bin/activate
 
+echo ">>> CUDA_HOME=$CUDA_HOME"
+echo ">>> which nvcc: $(which nvcc 2>&1)"
+python -c "from torch.utils.cpp_extension import CUDA_HOME; print('>>> torch cpp_extension CUDA_HOME:', CUDA_HOME)"
+
 echo "================================================================="
 echo " LCB SMOKE TEST"
 echo " Model       : $MODEL_NAME"
