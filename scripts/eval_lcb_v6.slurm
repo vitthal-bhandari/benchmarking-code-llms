@@ -53,6 +53,13 @@ export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
 export TORCH_HOME="/gscratch/scrubbed/$USER/.cache/torch"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
+# FlashInfer JIT-compiles some kernels at runtime and needs nvcc. Hyak's system
+# CUDA modules only go up to 12.9.1, but our torch build is cu130 — using them
+# would be a toolkit/ABI mismatch. Point at the CUDA 13 nvcc pip already
+# installed inside the venv (nvidia-cuda-nvcc) instead of a system module.
+export CUDA_HOME="$LCB_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
+export PATH="$CUDA_HOME/bin:$PATH"
+
 # Load HF token from .env
 [ -f "$PROJECT_DIR/.env" ] && source <(grep -v '^#' "$PROJECT_DIR/.env" | sed 's/ *#.*//')
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
@@ -66,6 +73,11 @@ QUANTIZATION=""
 
 cd "$LCB_DIR"
 
+# Activate the venv directly. Do NOT use `uv run` — it re-syncs the env to the
+# project's pinned deps and reverts our git-source transformers (needed for
+# qwen3_5_moe) back to the release that doesn't recognize the arch.
+source .venv/bin/activate
+
 echo "================================================================="
 echo " LiveCodeBench v6 — Code Generation Eval"
 echo " Model      : $MODEL_NAME"
@@ -76,7 +88,7 @@ echo " Start       : $(date)"
 echo "================================================================="
 
 # ── Sanity check ──────────────────────────────────────────────────────────────
-uv run python -c "
+python -c "
 import torch
 print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')
 from lcb_runner.lm_styles import LanguageModelStore
@@ -87,7 +99,7 @@ print('Model registered: OK')
 
 # ── Build eval command ────────────────────────────────────────────────────────
 EVAL_CMD=(
-  uv run python -m lcb_runner.runner.main
+  python -m lcb_runner.runner.main
   --model "$MODEL_NAME"
   --scenario codegeneration
   --evaluate
