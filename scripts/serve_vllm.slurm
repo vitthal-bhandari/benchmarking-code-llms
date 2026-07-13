@@ -44,6 +44,11 @@ export CUDA_HOME="$LCB_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
 export PATH="$CUDA_HOME/bin:$PATH"
 # Native sampler — avoids FlashInfer nvcc JIT in the spawned EngineCore worker.
 export VLLM_USE_FLASHINFER_SAMPLER=0
+# flashinfer-python and flashinfer-cubin got installed at mismatched versions
+# (0.6.14 / 0.6.13) during earlier debugging; this bypasses their hard version
+# check so `import flashinfer` doesn't crash. TODO: pin both to matching
+# versions properly once this pipeline is proven end-to-end.
+export FLASHINFER_DISABLE_VERSION_CHECK=1
 
 [ -f "$PROJECT_DIR/.env" ] && source <(grep -v '^#' "$PROJECT_DIR/.env" | sed 's/ *#.*//')
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
