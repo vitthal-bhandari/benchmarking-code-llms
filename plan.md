@@ -208,6 +208,10 @@ squeue --me   # get new node
 grep -m1 "Uvicorn running\|Application startup complete" logs/vllm_serve_*.out
 # update api_override.yaml's api_base to the new node, then:
 source agent-venv/bin/activate
+export MSWEA_COST_TRACKING='ignore_errors'   # our zero-cost registry entry computes
+                                              # to exactly 0.0, which mini-swe-agent's
+                                              # own cost sanity check rejects as if
+                                              # the model weren't registered at all
 LITELLM_MODEL_REGISTRY_PATH=registry.json mini-extra swebench \
   -m hosted_vllm/Qwen/Qwen3.6-35B-A3B-FP8 \
   -c swebench.yaml -c api_override.yaml \
