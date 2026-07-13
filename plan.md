@@ -85,8 +85,68 @@ All models are MoE or large dense — use quantized checkpoints, all fit on L40S
 - [x] Confirm quantization strategy
 - [x] Create LCB lm_styles patch
 - [x] Write Slurm scripts
-- [ ] Run `setup_lcb.sh` on Hyak login node
-- [ ] Run `install_venv.sh` inside salloc on gpu-l40s
+- [x] Run `setup_lcb.sh` on Hyak login node
+- [x] Run `install_venv.sh` inside salloc on gpu-l40s
 - [ ] Run `prewarm_models.slurm` to cache model weights
-- [ ] Smoke test: single model, 5 problems
+- [ ] Smoke test: single model, 5 problems (currently debugging transformers/vLLM version compat for qwen3_5_moe arch)
 - [ ] Submit full eval with `submit_all_models.sh`
+
+---
+
+## Baseline Matrix — Next Phase
+
+Goal end-state is an agent + memory contribution. To get there without overshooting,
+we climb one rung at a time and only add complexity where a benchmark's own design
+makes it informative:
+
+1. **B0 — Zero-shot, no agent, no memory (native harness)**: single prompt → single
+   generation → grade. Cheapest, always run first per benchmark.
+2. **B1 — Agent (ReAct-style loop), no memory**: model gets tools (execute code,
+   run tests, read files) and can iterate within one episode, but starts fresh
+   every episode. Isolates "does agentic iteration help" before we ask "does
+   memory on top of that help."
+3. **B2 — Agent + memory** (the actual contribution, not a baseline): deferred
+   until B0/B1 are solid on at least one benchmark.
+
+Not every benchmark supports every rung — don't force a zero-shot mode onto a
+benchmark that's inherently agentic (Terminal-Bench), and don't hand-roll a ReAct
+loop where the benchmark already ships one (LCB self-repair).
+
+| Benchmark | B0 zero-shot | B1 agent, no-memory | Notes |
+|---|---|---|---|
+| LiveCodeBench v6 | 🔄 in progress (current work) | Cheap add-on: LCB's built-in `selfrepair` scenario (generate → run tests → fix) — near-zero extra engineering, do this before building any custom agent scaffold | Best place to validate "agent, no-memory" cheaply |
+| SciCode | Same harness pattern as LCB, low marginal cost once LCB pipeline works | Defer — low value, redundant with LCB self-repair signal | Not a priority for agent baseline |
+| Terminal-Bench v2 | N/A — benchmark is inherently agentic, no meaningful zero-shot mode | Required — use official harness/adapter (e.g. Terminus) | Skip straight to B1 |
+| Terminal-Bench Hard | N/A | Reuse same harness validated on v2 | Just a harder task subset |
+| SWE-Bench Verified | Direct patch generation (Agentless-style, no tool loop) — cheap | mini-swe-agent or SWE-agent, no memory | Best 2×2 candidate: only benchmark where both B0 and B1 are well-precedented and cheap enough to run both |
+| SWE-Bench Pro | Defer until Verified pipeline (both B0 and B1) is proven | Defer, reuse Verified's harness once validated | Don't duplicate engineering effort across SWE-Bench variants |
+| SWE-Bench CL | Defer | Defer | Explicitly a continual-learning benchmark — natural home for the eventual B2 (agent + memory) experiment, not a near-term baseline |
+
+### SWE-Bench Verified B1 — concrete plan (started Jul 2026 wk2)
+
+Tooling decision: **mini-swe-agent** (not AdaMEM's repo). It is the canonical
+~100-line no-memory agent for SWE-Bench Verified, runs against any
+OpenAI-compatible endpoint via litellm, supports Apptainer/Singularity (Hyak has
+no Docker), and is the natural fork point for the later memory variant. AdaMEM's
+repo stays a design reference for B2's memory read/write structure only.
+
+Pipeline (prove end-to-end before scaling):
+1. Unblock vLLM with `VLLM_USE_FLASHINFER_SAMPLER=0` (avoids FlashInfer nvcc JIT
+   in the spawned EngineCore worker — the bug that blocked LCB).
+2. `scripts/serve_vllm.slurm`: `vllm serve <model>` on an L40S node → OpenAI API.
+3. Small separate venv, `pip install mini-swe-agent`; point it at the serve node;
+   environment = singularity. Smoke on **3 instances only**.
+4. Score smoke predictions via `sb-cli` (hosted eval — no local Docker harness).
+5. Only then: full Verified runs, top 2–3 models from LCB results.
+
+**Sequencing / compute discipline:**
+- Finish LCB v6 zero-shot (B0) across all 5 models first — in progress.
+- Add LCB `selfrepair` (B1) using the same 5 models — reuses the harness we already
+  have running, no new scaffold needed. This is the fastest signal on whether
+  agentic iteration matters before investing in SWE-Bench/Terminal-Bench agents.
+- Before running any agent baseline (B1) on SWE-Bench or Terminal-Bench, narrow to
+  the top 2–3 models from LCB zero-shot results rather than all 5 — 5 models × 2
+  baseline types × several benchmarks on a single-GPU L40S queue is more compute
+  than we need to make the point. Expand back to all 5 only if time/compute allow.
+- SciCode, SWE-Bench Pro, and SWE-Bench CL are explicitly deferred, not dropped —
+  revisit once the Verified pipeline (B0 + B1) is proven out.
