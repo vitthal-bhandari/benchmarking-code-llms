@@ -122,7 +122,11 @@ loop where the benchmark already ships one (LCB self-repair).
 | SWE-Bench Pro | Defer until Verified pipeline (both B0 and B1) is proven | Defer, reuse Verified's harness once validated | Don't duplicate engineering effort across SWE-Bench variants |
 | SWE-Bench CL | Defer | Defer | Explicitly a continual-learning benchmark — natural home for the eventual B2 (agent + memory) experiment, not a near-term baseline |
 
-### SWE-Bench Verified B1 — concrete plan (started Jul 2026 wk2)
+### SWE-Bench Verified B1 — ACTIVE TRACK (Jul 2026 wk2)
+
+**LCB is paused** — do not touch its code/scripts until this pipeline works.
+The `VLLM_USE_FLASHINFER_SAMPLER=0` fix is already committed to the LCB scripts;
+resuming LCB later is just `sbatch scripts/smoke_test_lcb.slurm`.
 
 Tooling decision: **mini-swe-agent** (not AdaMEM's repo). It is the canonical
 ~100-line no-memory agent for SWE-Bench Verified, runs against any
@@ -131,13 +135,15 @@ no Docker), and is the natural fork point for the later memory variant. AdaMEM's
 repo stays a design reference for B2's memory read/write structure only.
 
 Pipeline (prove end-to-end before scaling):
-1. Unblock vLLM with `VLLM_USE_FLASHINFER_SAMPLER=0` (avoids FlashInfer nvcc JIT
-   in the spawned EngineCore worker — the bug that blocked LCB).
-2. `scripts/serve_vllm.slurm`: `vllm serve <model>` on an L40S node → OpenAI API.
-3. Small separate venv, `pip install mini-swe-agent`; point it at the serve node;
-   environment = singularity. Smoke on **3 instances only**.
-4. Score smoke predictions via `sb-cli` (hosted eval — no local Docker harness).
-5. Only then: full Verified runs, top 2–3 models from LCB results.
+1. `scripts/serve_vllm.slurm`: `vllm serve <model>` on an L40S node → OpenAI API
+   (includes `VLLM_USE_FLASHINFER_SAMPLER=0` so no FlashInfer nvcc JIT).
+2. Separate small venv (`agent-venv`, py3.12), `pip install mini-swe-agent`.
+3. Verify Apptainer/Singularity works on a compute node (`apptainer --version`,
+   pull one SWE-Bench instance image) — the known unknown on Hyak.
+4. Smoke: mini-extra swebench, **3 instances**, model = served endpoint,
+   environment = singularity. Success = 3 patch predictions emitted.
+5. Score smoke predictions via `sb-cli` (hosted eval — no local Docker harness).
+6. Only then: full Verified run; start with 1 model, expand to top 2–3.
 
 **Sequencing / compute discipline:**
 - Finish LCB v6 zero-shot (B0) across all 5 models first — in progress.
