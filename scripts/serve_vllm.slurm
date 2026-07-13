@@ -29,6 +29,11 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.6-35B-A3B-FP8}"
 PORT="${PORT:-8000}"
+# Model defaults to 262144 max context, but after loading 35B FP8 weights on a
+# single L40S (48GB) there's only ~4.6 GiB left for KV cache — not enough for
+# that full window. 64K is generous for mini-swe-agent's tool-call trajectories
+# and leaves plenty of KV cache headroom. Override via --export if needed.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 
 PROJECT_DIR="/gscratch/scrubbed/$USER/benchmarking-code-llms"
 LCB_DIR="$PROJECT_DIR/LiveCodeBench"
@@ -61,6 +66,7 @@ echo ">>> Serving $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
 vllm serve "$MODEL_NAME" \
   --host 0.0.0.0 \
   --port "$PORT" \
+  --max-model-len "$MAX_MODEL_LEN" \
   --dtype auto \
   --trust-remote-code \
   --enforce-eager
