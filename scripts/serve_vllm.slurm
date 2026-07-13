@@ -34,6 +34,14 @@ PORT="${PORT:-8000}"
 # that full window. 64K is generous for mini-swe-agent's tool-call trajectories
 # and leaves plenty of KV cache headroom. Override via --export if needed.
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
+# mini-swe-agent (via litellm) sends tool_choice="auto" with tool defs, which
+# vLLM refuses unless explicitly enabled with a parser matching how the model
+# formats tool calls in its raw text output. "hermes" is the common vLLM
+# parser for Qwen-family models — VERIFY before trusting this blindly:
+#   vllm serve --help | grep -A5 "\-\-tool-call-parser"
+# lists the valid choices; cross-check against Qwen3.6's model card / vLLM's
+# supported_models docs for the recommended parser if "hermes" misbehaves.
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-hermes}"
 
 PROJECT_DIR="/gscratch/scrubbed/$USER/benchmarking-code-llms"
 LCB_DIR="$PROJECT_DIR/LiveCodeBench"
@@ -62,6 +70,12 @@ export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
 cd "$LCB_DIR"
 source .venv/bin/activate
 
+# A newer fastapi/starlette landed transitively during earlier torch/vllm
+# reinstalls; prometheus-fastapi-instrumentator's routing.py wasn't compatible
+# with it (AttributeError: '_IncludedRouter' object has no attribute 'path'
+# on every request). Upgrading it is the narrow fix — doesn't touch inference.
+pip install --upgrade --no-cache-dir prometheus-fastapi-instrumentator
+
 echo ">>> Serving $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
 vllm serve "$MODEL_NAME" \
   --host 0.0.0.0 \
@@ -69,4 +83,6 @@ vllm serve "$MODEL_NAME" \
   --max-model-len "$MAX_MODEL_LEN" \
   --dtype auto \
   --trust-remote-code \
-  --enforce-eager
+  --enforce-eager \
+  --enable-auto-tool-choice \
+  --tool-call-parser "$TOOL_CALL_PARSER"

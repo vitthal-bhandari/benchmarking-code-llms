@@ -156,3 +156,69 @@ Pipeline (prove end-to-end before scaling):
   than we need to make the point. Expand back to all 5 only if time/compute allow.
 - SciCode, SWE-Bench Pro, and SWE-Bench CL are explicitly deferred, not dropped —
   revisit once the Verified pipeline (B0 + B1) is proven out.
+
+### Status as of end of Jul 12 2026 session — resume here
+
+Progress: steps 1–4 above are mostly done. vLLM server is confirmed serving
+correctly (curl to `/v1/chat/completions` returns a valid completion). Config
+plumbing for mini-swe-agent is solved: use **two file-based `-c` configs**
+(`-c swebench.yaml -c api_override.yaml`), NOT inline `-c key=value` — inline
+overrides hit an unexplained click argument-parsing bug. `api_override.yaml`:
+```yaml
+model:
+  model_kwargs:
+    api_base: http://<node>:8000/v1
+```
+Model prefix is `hosted_vllm/<model>` (litellm's dedicated self-hosted-vLLM
+provider), not `openai/<model>`. Needs `LITELLM_MODEL_REGISTRY_PATH=registry.json`
+pointing at a small JSON file so litellm doesn't choke on an unrecognized
+model's cost lookup (see any recent smoke_run*/ for the exact registry.json
+used). `agent-venv` also needed `pip install fastapi 'litellm[proxy]'` —
+litellm's `completion()` eagerly imports MCP/proxy-server code that needs
+these even for plain non-proxy usage.
+
+**Bugs fixed and now baked into `scripts/serve_vllm.slurm`** (pull picks these up):
+- FlashInfer nvcc JIT / sampler → `VLLM_USE_FLASHINFER_SAMPLER=0`
+- flashinfer-python/cubin version mismatch → `FLASHINFER_DISABLE_VERSION_CHECK=1`
+- KV cache OOM at full 262K context → `--max-model-len 65536`
+- `prometheus-fastapi-instrumentator` incompatible with newer starlette
+  (`_IncludedRouter` AttributeError on every request) → upgraded in-script
+- Tool-calling 400 error (`"auto" tool choice requires --enable-auto-tool-choice
+  and --tool-call-parser`) → added both flags, `TOOL_CALL_PARSER` defaults to
+  `"hermes"` (common vLLM parser for Qwen-family models)
+
+**UNVERIFIED — do this first when resuming:**
+`"hermes"` as the tool-call parser is an educated guess, not confirmed against
+Qwen3.6 specifically. Before trusting it:
+```bash
+vllm serve --help | grep -A5 "\-\-tool-call-parser"
+```
+lists valid choices — cross-check against Qwen3.6's model card / vLLM's
+supported-models docs. If `hermes` produces garbled/unparseable tool calls in
+the trajectory logs (`smoke_run*/*/*.traj.json`) rather than a clean error,
+that's the symptom of a wrong parser — try another from the `--help` list via
+`--export=TOOL_CALL_PARSER=<name>`.
+
+**Resume steps on Hyak:**
+```bash
+cd /gscratch/scrubbed/$USER/benchmarking-code-llms && git pull
+sbatch scripts/serve_vllm.slurm
+squeue --me   # get new node
+# wait for ready:
+grep -m1 "Uvicorn running\|Application startup complete" logs/vllm_serve_*.out
+# update api_override.yaml's api_base to the new node, then:
+source agent-venv/bin/activate
+LITELLM_MODEL_REGISTRY_PATH=registry.json mini-extra swebench \
+  -m hosted_vllm/Qwen/Qwen3.6-35B-A3B-FP8 \
+  -c swebench.yaml -c api_override.yaml \
+  --subset verified --split test --slice 0:3 \
+  --environment-class singularity --workers 1 --output smoke_run6/
+```
+If this finally succeeds (3 patch predictions, no errors), next is scoring via
+`sb-cli` — not yet attempted, no blockers known.
+
+Separately unverified: Apptainer/Singularity itself (plan step 3) was never
+explicitly confirmed working — the runs so far all failed before reaching
+actual environment/container execution (config, network, or tool-parsing
+errors). If a *new* class of error shows up mentioning singularity/apptainer/
+container pull, that's the next unverified layer, not a regression.
