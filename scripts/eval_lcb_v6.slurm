@@ -60,6 +60,11 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export CUDA_HOME="$LCB_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
 export PATH="$CUDA_HOME/bin:$PATH"
 
+# The FlashInfer sampling kernel JIT-compiles via nvcc inside vLLM's spawned
+# EngineCore worker, which doesn't resolve our CUDA_HOME. Use vLLM's native
+# sampler instead — slightly slower sampling, no compilation at all.
+export VLLM_USE_FLASHINFER_SAMPLER=0
+
 # Load HF token from .env
 [ -f "$PROJECT_DIR/.env" ] && source <(grep -v '^#' "$PROJECT_DIR/.env" | sed 's/ *#.*//')
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
