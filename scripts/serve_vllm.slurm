@@ -36,12 +36,14 @@ PORT="${PORT:-8000}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 # mini-swe-agent (via litellm) sends tool_choice="auto" with tool defs, which
 # vLLM refuses unless explicitly enabled with a parser matching how the model
-# formats tool calls in its raw text output. "hermes" is the common vLLM
-# parser for Qwen-family models — VERIFY before trusting this blindly:
-#   vllm serve --help | grep -A5 "\-\-tool-call-parser"
-# lists the valid choices; cross-check against Qwen3.6's model card / vLLM's
-# supported_models docs for the recommended parser if "hermes" misbehaves.
-TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-hermes}"
+# formats tool calls in its raw text output. Qwen3.6 emits
+# <tool_call><function=NAME><parameter=KEY>value</parameter></function></tool_call>
+# — confirmed by diffing a real trajectory against vllm's tool_parsers source;
+# qwen3coder_tool_parser.py hardcodes these exact sentinel tokens
+# (tool_call_start_token="<tool_call>", tool_call_prefix="<function=").
+# "hermes" (JSON-based <tool_call>{"name":...}</tool_call>) doesn't match this
+# shape and left tool_calls null, causing RepeatedFormatError.
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
 
 PROJECT_DIR="/gscratch/scrubbed/$USER/benchmarking-code-llms"
 LCB_DIR="$PROJECT_DIR/LiveCodeBench"
