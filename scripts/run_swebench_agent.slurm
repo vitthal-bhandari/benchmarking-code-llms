@@ -40,6 +40,17 @@ source agent-venv/bin/activate
 
 export MSWEA_COST_TRACKING='ignore_errors'
 
+# Hyak routes outbound HTTP through a Squid proxy (klone-dip1) by default,
+# including requests between two compute nodes on the cluster's own internal
+# network. Under concurrent workers this intermittently fails with
+# "Connection refused" (litellm.ServiceUnavailableError wrapping a Squid
+# ERR_CONNECT_FAIL page) — pure network flakiness, not a model/agent bug.
+# Bypass the proxy only for Hyak's internal range so requests to the vLLM
+# node go direct; leave the proxy in place for genuine external traffic
+# (Singularity still needs it to pull SWE-Bench images from docker.io).
+export NO_PROXY="10.64.0.0/16,localhost,127.0.0.1"
+export no_proxy="$NO_PROXY"
+
 echo ">>> Model: $MODEL_NAME"
 echo ">>> Slice: $SLICE"
 echo ">>> Workers: $WORKERS"
