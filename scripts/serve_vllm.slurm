@@ -44,6 +44,17 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 # "hermes" (JSON-based <tool_call>{"name":...}</tool_call>) doesn't match this
 # shape and left tool_calls null, causing RepeatedFormatError.
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
+# Empty by default (Qwen/Poolside checkpoints are already pre-quantized and
+# vLLM auto-detects that from config.json). Set to "fp8" for a native/BF16
+# checkpoint that needs on-the-fly quantization to fit on a 48GB L40S — e.g.
+# gemma-4-26B-A4B-it is ~49GB unquantized, doesn't fit without this.
+QUANTIZATION="${QUANTIZATION:-}"
+# Empty by default (vLLM's own default of 2048 is fine for text-only models).
+# Multimodal models (e.g. Gemma4) force --disable-chunked-mm-input, which
+# requires max_num_batched_tokens >= max_tokens_per_mm_item (one multimodal
+# item must fit in a single scheduling step) — Gemma4 needs at least 2496;
+# set a comfortable margin above that when serving it.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 
 PROJECT_DIR="/gscratch/scrubbed/$USER/benchmarking-code-llms"
 LCB_DIR="$PROJECT_DIR/LiveCodeBench"
@@ -78,7 +89,19 @@ source .venv/bin/activate
 # on every request). Upgrading it is the narrow fix — doesn't touch inference.
 pip install --upgrade --no-cache-dir prometheus-fastapi-instrumentator
 
+QUANT_ARGS=()
+if [ -n "$QUANTIZATION" ]; then
+  QUANT_ARGS=(--quantization "$QUANTIZATION")
+fi
+
+BATCH_ARGS=()
+if [ -n "$MAX_NUM_BATCHED_TOKENS" ]; then
+  BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
+fi
+
 echo ">>> Serving $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
+echo ">>> Quantization: ${QUANTIZATION:-auto-detected from checkpoint}"
+echo ">>> Max num batched tokens: ${MAX_NUM_BATCHED_TOKENS:-vLLM default}"
 vllm serve "$MODEL_NAME" \
   --host 0.0.0.0 \
   --port "$PORT" \
@@ -87,4 +110,6 @@ vllm serve "$MODEL_NAME" \
   --trust-remote-code \
   --enforce-eager \
   --enable-auto-tool-choice \
-  --tool-call-parser "$TOOL_CALL_PARSER"
+  --tool-call-parser "$TOOL_CALL_PARSER" \
+  "${QUANT_ARGS[@]}" \
+  "${BATCH_ARGS[@]}"
