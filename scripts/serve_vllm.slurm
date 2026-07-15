@@ -44,6 +44,11 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 # "hermes" (JSON-based <tool_call>{"name":...}</tool_call>) doesn't match this
 # shape and left tool_calls null, causing RepeatedFormatError.
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
+# Empty by default (Qwen/Poolside checkpoints are already pre-quantized and
+# vLLM auto-detects that from config.json). Set to "fp8" for a native/BF16
+# checkpoint that needs on-the-fly quantization to fit on a 48GB L40S — e.g.
+# gemma-4-26B-A4B-it is ~49GB unquantized, doesn't fit without this.
+QUANTIZATION="${QUANTIZATION:-}"
 
 PROJECT_DIR="/gscratch/scrubbed/$USER/benchmarking-code-llms"
 LCB_DIR="$PROJECT_DIR/LiveCodeBench"
@@ -78,7 +83,13 @@ source .venv/bin/activate
 # on every request). Upgrading it is the narrow fix — doesn't touch inference.
 pip install --upgrade --no-cache-dir prometheus-fastapi-instrumentator
 
+QUANT_ARGS=()
+if [ -n "$QUANTIZATION" ]; then
+  QUANT_ARGS=(--quantization "$QUANTIZATION")
+fi
+
 echo ">>> Serving $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
+echo ">>> Quantization: ${QUANTIZATION:-auto-detected from checkpoint}"
 vllm serve "$MODEL_NAME" \
   --host 0.0.0.0 \
   --port "$PORT" \
@@ -87,4 +98,5 @@ vllm serve "$MODEL_NAME" \
   --trust-remote-code \
   --enforce-eager \
   --enable-auto-tool-choice \
-  --tool-call-parser "$TOOL_CALL_PARSER"
+  --tool-call-parser "$TOOL_CALL_PARSER" \
+  "${QUANT_ARGS[@]}"
