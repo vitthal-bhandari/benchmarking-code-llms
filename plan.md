@@ -187,42 +187,77 @@ these even for plain non-proxy usage.
   and --tool-call-parser`) → added both flags, `TOOL_CALL_PARSER` defaults to
   `"hermes"` (common vLLM parser for Qwen-family models)
 
-**UNVERIFIED — do this first when resuming:**
-`"hermes"` as the tool-call parser is an educated guess, not confirmed against
-Qwen3.6 specifically. Before trusting it:
-```bash
-vllm serve --help | grep -A5 "\-\-tool-call-parser"
-```
-lists valid choices — cross-check against Qwen3.6's model card / vLLM's
-supported-models docs. If `hermes` produces garbled/unparseable tool calls in
-the trajectory logs (`smoke_run*/*/*.traj.json`) rather than a clean error,
-that's the symptom of a wrong parser — try another from the `--help` list via
-`--export=TOOL_CALL_PARSER=<name>`.
+### Status as of Jul 13 2026 session — B1 smoke test SUCCEEDED (3/3 Submitted)
 
-**Resume steps on Hyak:**
+**RESOLVED — tool-call-parser.** `"hermes"` was wrong. vLLM's `--help` output
+changed to a grouped format in this version (`vllm serve --help=<flag or
+ConfigGroup>`, e.g. `vllm serve --help=tool-call-parser` to see valid choices —
+plain `--help` only lists group names now). Qwen3.6 emits tool calls as
+`<tool_call>\n<function=NAME>\n<parameter=KEY>value</parameter>\n</function>\n</tool_call>`
+— confirmed by diffing a failing trajectory's raw model output against vLLM's
+tool-parser source (`vllm/tool_parsers/qwen3coder_tool_parser.py` hardcodes
+these exact sentinel tokens: `tool_call_start_token="<tool_call>"`,
+`tool_call_prefix="<function="`). `hermes` expects a JSON-blob format instead,
+so it silently failed to populate `tool_calls` (left it `null`, dumped the raw
+tags into `content`), which mini-swe-agent correctly read as "no tool call" and
+gave up after 3 consecutive failures → `RepeatedFormatError`. Fixed:
+`TOOL_CALL_PARSER` default in `scripts/serve_vllm.slurm` is now `qwen3_coder`.
+(`qwen3_xml` was the other candidate with a similar tag shape but delegates to
+a generic `StreamingXMLToolCallParser` — not a literal match, ruled out.)
+
+**RESOLVED — stray 404 noise.** After restarting with the new parser, the
+server log showed a burst of `The model \`Qwen/Qwen3.5-27B\` does not exist`
+404s. Traced the source IP to `klone-dip1` (a shared Hyak gateway node, not a
+compute node under our control) — `squeue --me` confirmed no stray job of ours
+was running. This is unrelated cluster crosstalk through shared proxy
+infrastructure (same family of issue as the earlier Squid-proxy weirdness),
+safe to ignore/filter with `grep -v "Qwen3.5-27B"` when reading server logs.
+
+**RESOLVED — Apptainer/Singularity.** Previously unverified; now confirmed
+working end-to-end — `smoke_run10/` built and ran real Singularity sandboxes
+for all 3 SWE-Bench Verified instances (astropy-12907, astropy-13033,
+astropy-13236) through many agent steps each.
+
+**Result:** `smoke_run10/` — 3/3 instances finished with `Exit Status:
+Submitted` (real patches generated via the `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+flow, not crashes). This is the first fully-working pass of the B1 pipeline.
+
+**RESOLVED — scoring via `sb-cli`.** `pip install sb-cli`, `sb-cli gen-api-key
+<email>` → verify code from email via `sb-cli verify-api-key <code>` →
+`export SWEBENCH_API_KEY=<key>`. mini-swe-agent's swebench runner already
+writes a ready-to-submit `preds.json` at the top of the output dir (no
+conversion needed). One doc/reality mismatch hit along the way: the docs page
+implied `swe-bench_verified` only supports `--split dev`, but the live API
+rejected that (`Invalid split: dev — must be one of ['test']`) — `test` is
+actually correct (and is the only split Verified has upstream anyway). Working
+command:
 ```bash
-cd /gscratch/scrubbed/$USER/benchmarking-code-llms && git pull
-sbatch scripts/serve_vllm.slurm
-squeue --me   # get new node
-# wait for ready:
-grep -m1 "Uvicorn running\|Application startup complete" logs/vllm_serve_*.out
-# update api_override.yaml's api_base to the new node, then:
+sb-cli submit swe-bench_verified test \
+  --predictions_path smoke_run10/preds.json --run_id smoke_run10 \
+  --instance_ids astropy__astropy-12907,astropy__astropy-13033,astropy__astropy-13236
+```
+
+**Result: `smoke_run10` scored 0/3 resolved** (`Successful runs: 0, Failed
+runs: 3, Errors: 0` — evaluation itself ran cleanly, the patches just didn't
+fix the issues). Full report: `sb-cli-reports/swe-bench_verified__test__smoke_run10.json`.
+n=3 is not statistically meaningful on its own (real per-model Verified
+resolve rates are rarely near 0%) — next step is reading the per-instance
+report detail to see *why* each failed (patch didn't apply vs. tests still
+fail vs. wrong fix) before deciding whether this points at a real prompting/
+model issue or is just small-sample noise.
+
+**This closes out the "prove the B1 pipeline end-to-end" goal** — vLLM
+serving, tool-call parsing, Singularity sandboxing, patch generation, and
+sb-cli scoring are all now confirmed working. Remaining before scaling up:
+diagnose the 0/3 result, then move to a larger instance count (plan step 6).
+
+**Resume steps on Hyak (once continuing):**
+```bash
+cd /gscratch/scrubbed/$USER/benchmarking-code-llms
+squeue --me   # confirm vllm_serve job still alive, get node
+# if not alive: sbatch scripts/serve_vllm.slurm, wait for Uvicorn line, update api_override.yaml
 source agent-venv/bin/activate
-export MSWEA_COST_TRACKING='ignore_errors'   # our zero-cost registry entry computes
-                                              # to exactly 0.0, which mini-swe-agent's
-                                              # own cost sanity check rejects as if
-                                              # the model weren't registered at all
-LITELLM_MODEL_REGISTRY_PATH=registry.json mini-extra swebench \
-  -m hosted_vllm/Qwen/Qwen3.6-35B-A3B-FP8 \
-  -c swebench.yaml -c api_override.yaml \
-  --subset verified --split test --slice 0:3 \
-  --environment-class singularity --workers 1 --output smoke_run6/
+export MSWEA_COST_TRACKING='ignore_errors'
+export SWEBENCH_API_KEY=<key>   # from sb-cli gen-api-key, saved to ~/.bashrc or ~/.zshrc
+python3 -m json.tool sb-cli-reports/swe-bench_verified__test__smoke_run10.json | less
 ```
-If this finally succeeds (3 patch predictions, no errors), next is scoring via
-`sb-cli` — not yet attempted, no blockers known.
-
-Separately unverified: Apptainer/Singularity itself (plan step 3) was never
-explicitly confirmed working — the runs so far all failed before reaching
-actual environment/container execution (config, network, or tool-parsing
-errors). If a *new* class of error shows up mentioning singularity/apptainer/
-container pull, that's the next unverified layer, not a regression.
