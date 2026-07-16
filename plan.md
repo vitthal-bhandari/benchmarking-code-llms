@@ -261,3 +261,62 @@ export MSWEA_COST_TRACKING='ignore_errors'
 export SWEBENCH_API_KEY=<key>   # from sb-cli gen-api-key, saved to ~/.bashrc or ~/.zshrc
 python3 -m json.tool sb-cli-reports/swe-bench_verified__test__smoke_run10.json | less
 ```
+
+### Status as of Jul 14 2026 session — scaling to 20 instances × 2 models
+
+Pivoted from the original "narrow to top 2-3 models via LCB zero-shot first"
+sequencing (LCB B0 is still paused/incomplete) to a pragmatic call: run
+Qwen3.6 + one second model at 20 instances each, in parallel, ahead of an
+advisor standup. Documenting the deviation here since it's not data-driven —
+just a deadline-driven scope call.
+
+**Second model: Gemma4 26B-A4B** (`google/gemma-4-26B-A4B-it`), not Poolside
+Laguna XS.2 as originally planned — Poolside's server died on both `gpu-l40s`
+and `ckpt-g2` without a clear error in the logs (likely preemption/node
+contention, never fully diagnosed — deprioritized once Gemma4 became the
+target). Two new Gemma4-specific fixes went into `scripts/serve_vllm.slurm`:
+
+- **`QUANTIZATION` flag** — Gemma4's cached checkpoint is native/unquantized
+  (~49GB on disk), which doesn't fit a 48GB L40S at all. Added
+  `--quantization fp8` (vLLM's on-the-fly FP8 conversion, supported natively
+  on Ada Lovelace GPUs) via a new parameterized `QUANTIZATION` env var
+  (empty/no-op by default so it doesn't affect Qwen/Poolside's pre-quantized
+  checkpoints).
+- **`MAX_NUM_BATCHED_TOKENS` flag** — Gemma4 is multimodal, which forces vLLM
+  to disable chunked MM input; this requires the scheduler's per-step token
+  budget to be ≥ the model's max tokens-per-multimodal-item (2496), but
+  vLLM's default (2048) is under that, causing a hard startup `ValueError`.
+  Added a parameterized flag, set to 4096 for Gemma4.
+- **Tool-call parser**: `gemma4` — an exact family-matched name in vLLM's
+  parser list (same discovery as `qwen3_coder`/`poolside_v1` earlier),
+  applied directly instead of repeating the `hermes`-guessing mistake.
+
+**Hyak/Slurm lessons (also added to `HYAK_CHEATSHEET.md`):** `stf` is the
+*account*, not a partition — `sinfo -p stf` returns nothing; the real
+partition is `gpu-l40s` (`-A stf -p gpu-l40s`). Partition-level GPU-type
+availability is per-node and shifts fast — `sinfo -p <partition> -N -o "%N %T
+%G"` shows live per-node state/GPU-type, worth checking before submitting
+rather than trusting a stale `hyakalloc` snapshot. A `PD` reason of "Nodes
+required for job are DOWN, DRAINED or reserved for jobs in higher priority
+partitions" on `ckpt-g2` isn't necessarily a dead end — a job can still land
+and run for several minutes before dying with `sacct` state `PREEMPTED`
+(check `sacct -j <id> --format=State,ExitCode,Elapsed` to distinguish real
+crashes from preemption). Running two of our own jobs on the *same* partition
+concurrently is fine (`cpu-g2` ran both models' agent drivers simultaneously
+without conflict) — a `PD` reason of `AssocGrpCpuLimit` is an account-wide
+CPU quota being hit, not a same-partition restriction; switching to a
+partition with more free headroom (per `hyakalloc`) resolved it.
+
+**Known limitation surfaced mid-run:** Qwen's 20-instance run hit a
+`ContextWindowExceededError` on at least one instance (trajectory grew past
+the `65536`-token cap set for KV-cache-budget reasons). Not a bug — a
+real tradeoff between context length and KV-cache headroom on a 48GB card.
+mini-swe-agent handles it gracefully (marks that instance as an error,
+continues the run) — worth noting as a caveat in reported resolve rates
+rather than something to fix under tonight's time constraint.
+
+**Current state (all 4 jobs running in parallel):** Qwen3.6 vLLM server
+(`ckpt-all`), Qwen3.6 agent driver × 20 instances (`cpu-g2`, `run_qwen_20/`),
+Gemma4 vLLM server (`gpu-l40s`), Gemma4 agent driver × 20 instances
+(`cpu-g2`, `run_gemma4_20/`). Results pending — score both via `sb-cli
+submit swe-bench_verified test` once complete, same pattern as `smoke_run10`.
