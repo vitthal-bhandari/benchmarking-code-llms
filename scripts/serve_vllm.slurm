@@ -55,6 +55,14 @@ QUANTIZATION="${QUANTIZATION:-}"
 # item must fit in a single scheduling step) — Gemma4 needs at least 2496;
 # set a comfortable margin above that when serving it.
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+# Empty by default (vLLM's native KV cache dtype matches model dtype). Set to
+# "fp8" to store the KV cache itself in FP8 instead of the model's native
+# precision — roughly halves KV-cache memory per token, independent of
+# --quantization (which only affects the weights). This is what actually
+# raises the safe --max-model-len ceiling on a memory-constrained GPU like a
+# 48GB L40S; untested combination as of Jul 15 2026, watch server startup for
+# OOM and back off MAX_MODEL_LEN if needed.
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
 
 PROJECT_DIR="/gscratch/scrubbed/$USER/benchmarking-code-llms"
 LCB_DIR="$PROJECT_DIR/LiveCodeBench"
@@ -99,9 +107,16 @@ if [ -n "$MAX_NUM_BATCHED_TOKENS" ]; then
   BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
 fi
 
+KV_CACHE_ARGS=()
+if [ -n "$KV_CACHE_DTYPE" ]; then
+  KV_CACHE_ARGS=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+fi
+
 echo ">>> Serving $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
 echo ">>> Quantization: ${QUANTIZATION:-auto-detected from checkpoint}"
 echo ">>> Max num batched tokens: ${MAX_NUM_BATCHED_TOKENS:-vLLM default}"
+echo ">>> KV cache dtype: ${KV_CACHE_DTYPE:-vLLM default (matches model dtype)}"
+echo ">>> Max model len: $MAX_MODEL_LEN"
 vllm serve "$MODEL_NAME" \
   --host 0.0.0.0 \
   --port "$PORT" \
@@ -112,4 +127,5 @@ vllm serve "$MODEL_NAME" \
   --enable-auto-tool-choice \
   --tool-call-parser "$TOOL_CALL_PARSER" \
   "${QUANT_ARGS[@]}" \
-  "${BATCH_ARGS[@]}"
+  "${BATCH_ARGS[@]}" \
+  "${KV_CACHE_ARGS[@]}"
