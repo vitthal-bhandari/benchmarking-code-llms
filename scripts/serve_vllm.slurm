@@ -10,7 +10,7 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 # =============================================================================
-# serve_vllm.slurm — OpenAI-compatible vLLM server for agent baselines
+# serve_vllm.slurm —  OpenAI-compatible vLLM server for agent baselines
 # (mini-swe-agent on SWE-Bench Verified talks to this endpoint).
 #
 # Usage:
