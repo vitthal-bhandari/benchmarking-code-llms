@@ -94,8 +94,19 @@ source .venv/bin/activate
 # A newer fastapi/starlette landed transitively during earlier torch/vllm
 # reinstalls; prometheus-fastapi-instrumentator's routing.py wasn't compatible
 # with it (AttributeError: '_IncludedRouter' object has no attribute 'path'
-# on every request). Upgrading it is the narrow fix — doesn't touch inference.
-pip install --upgrade --no-cache-dir prometheus-fastapi-instrumentator
+# on every request). Upgrading it was the narrow fix at the time — but on a
+# freshly `uv sync`'d venv this now backfires: pulling in the latest
+# prometheus-fastapi-instrumentator (8.0.2) drags in starlette>=1.0, which
+# breaks fastapi's own pinned starlette<0.47 requirement
+# (TypeError: Router.__init__() got an unexpected keyword argument
+# 'on_startup'). A fresh `uv sync` installs a mutually-consistent, locked
+# version set already — only run this upgrade if that old _IncludedRouter
+# bug actually resurfaces (e.g. after further ad-hoc pip installs drift the
+# venv again), not unconditionally on every launch.
+SKIP_PROM_UPGRADE="${SKIP_PROM_UPGRADE:-1}"
+if [ "$SKIP_PROM_UPGRADE" != "1" ]; then
+  pip install --upgrade --no-cache-dir prometheus-fastapi-instrumentator
+fi
 
 QUANT_ARGS=()
 if [ -n "$QUANTIZATION" ]; then
