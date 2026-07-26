@@ -105,6 +105,12 @@ if command -v g++ >/dev/null 2>&1; then
   export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-} -ccbin $(command -v g++)"
   echo ">>> nvcc host compiler: $(command -v g++) ($(g++ -dumpversion 2>/dev/null))"
 fi
+# CCCL hard-errors unless nvcc's version exactly equals the CUDA runtime headers'
+# CUDART_VERSION ("CUDA compiler and CUDA toolkit headers are incompatible"). Our
+# venv has mixed CUDA 12 and 13 pip packages, so that check fails even though the
+# combination works. The header documents this define as the intended opt-out for
+# "a newer CTK than the compiler ships".
+export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-} -DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK"
 # deep_gemm's compiled _C extension links against libnvrtc.so.13/libcudart.so.13
 # in cu13/lib, which aren't on the default runtime search path (pip's CUDA
 # packages ship versioned .so files only; we also added unversioned symlinks
