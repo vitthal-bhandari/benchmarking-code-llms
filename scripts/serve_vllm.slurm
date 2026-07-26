@@ -93,6 +93,14 @@ mkdir -p "$VLLM_CACHE_ROOT"
 GCC_BIN="${GCC_BIN:-/sw/gcc/11.2.0/bin}"
 if [ -x "$GCC_BIN/g++" ]; then
   export PATH="$GCC_BIN:$PATH"
+  # Putting the compiler on PATH is only the compile-time half. Kernels built
+  # with it require symbol versions (e.g. GLIBCXX_3.4.26) that only exist in
+  # THIS gcc's own libstdc++.so.6 — the runtime loader otherwise falls back to
+  # the node's older system libstdc++ and fails with "version `GLIBCXX_3.4.26'
+  # not found", even though the .so itself compiled fine. Put the matching
+  # lib64 first on the search path.
+  GCC_LIB64="${GCC_BIN%/bin}/lib64"
+  [ -d "$GCC_LIB64" ] && export LD_LIBRARY_PATH="$GCC_LIB64:${LD_LIBRARY_PATH:-}"
 else
   echo ">>> WARNING: no g++ at $GCC_BIN — DeepGEMM JIT will fail on Hopper (H200)"
 fi
