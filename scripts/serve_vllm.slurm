@@ -117,6 +117,14 @@ export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-} -DCCCL_DISABLE_CTK_COMPATIBIL
 # there for the link step of the DeepGEMM source build). Needed for FP8 weight
 # loading on Hopper (H200) — harmless elsewhere.
 export LD_LIBRARY_PATH="$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
+# pip's nvidia-cu13 package only ships cu13/lib, not the traditional cu13/lib64
+# — but some JIT-compiled kernels (e.g. Qwen3.6's GDN/linear-attention prefill
+# kernel, compiled by FlashInfer at first real use) hardcode -L.../lib64 and
+# silently fail to link (ld: cannot find -lcudart), non-fatal but forces a
+# slower fallback path with an explicit "may OOM due to autotuner" risk.
+# Symlinking the whole directory covers this and any similarly-affected future
+# kernel.
+[ -e "$CUDA_HOME/lib64" ] || ln -sf lib "$CUDA_HOME/lib64"
 # Native sampler — avoids FlashInfer nvcc JIT in the spawned EngineCore worker.
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # flashinfer-python and flashinfer-cubin got installed at mismatched versions
