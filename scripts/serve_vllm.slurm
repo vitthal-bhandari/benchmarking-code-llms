@@ -81,12 +81,21 @@ mkdir -p "$VLLM_CACHE_ROOT"
 
 # A modern host compiler must be on PATH before nvcc runs. DeepGEMM (Hopper FP8)
 # JIT-compiles kernels at *runtime*, during KV-cache profiling — not just at
-# build time — and nvcc shells out to whatever g++ it finds. The node default is
-# pre-C++17, so nvcc silently drops its -std=c++20 flag and CCCL then fails with
-# "CUDA compiler and CUDA toolkit headers are incompatible" / "libcu++ requires
-# at least C++ 17". `module` is only available inside allocations, which is why
-# this belongs here and not in a login-node setup step.
-module load gcc 2>/dev/null || echo ">>> WARNING: 'module load gcc' failed; DeepGEMM JIT may fail on Hopper"
+# build time — and nvcc shells out to whatever g++ it finds. The node default
+# (/usr/bin/g++, GCC 8) predates C++20, so nvcc silently drops its -std=c++20
+# flag and CCCL then fails with "CUDA compiler and CUDA toolkit headers are
+# incompatible" / "libcu++ requires at least C++ 17".
+#
+# `module load gcc` is NOT reliable here: it works in an interactive salloc but
+# exits 0 without changing PATH in a non-interactive batch shell. Point at the
+# module tree's compiler directly instead; override with GCC_BIN if the path
+# changes. Verify with: ls -d /sw/gcc/*/bin
+GCC_BIN="${GCC_BIN:-/sw/gcc/11.2.0/bin}"
+if [ -x "$GCC_BIN/g++" ]; then
+  export PATH="$GCC_BIN:$PATH"
+else
+  echo ">>> WARNING: no g++ at $GCC_BIN — DeepGEMM JIT will fail on Hopper (H200)"
+fi
 
 export CUDA_HOME="$LCB_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
 export PATH="$CUDA_HOME/bin:$PATH"
