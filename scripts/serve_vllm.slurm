@@ -76,6 +76,12 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 export CUDA_HOME="$LCB_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
 export PATH="$CUDA_HOME/bin:$PATH"
+# deep_gemm's compiled _C extension links against libnvrtc.so.13/libcudart.so.13
+# in cu13/lib, which aren't on the default runtime search path (pip's CUDA
+# packages ship versioned .so files only; we also added unversioned symlinks
+# there for the link step of the DeepGEMM source build). Needed for FP8 weight
+# loading on Hopper (H200) — harmless elsewhere.
+export LD_LIBRARY_PATH="$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
 # Native sampler — avoids FlashInfer nvcc JIT in the spawned EngineCore worker.
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # flashinfer-python and flashinfer-cubin got installed at mismatched versions
