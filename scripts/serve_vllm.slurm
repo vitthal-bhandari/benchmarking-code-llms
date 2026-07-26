@@ -73,9 +73,29 @@ export HF_HUB_CACHE="$HF_HOME/hub"
 export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
 export TORCH_HOME="/gscratch/scrubbed/$USER/.cache/torch"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+# vLLM defaults its cache (incl. DeepGEMM's JIT kernel cache) to ~/.cache/vllm.
+# $HOME is capped at 10GB on Hyak and filling it corrupts things badly — keep
+# it on scratch like every other cache.
+export VLLM_CACHE_ROOT="/gscratch/scrubbed/$USER/.cache/vllm"
+mkdir -p "$VLLM_CACHE_ROOT"
+
+# A modern host compiler must be on PATH before nvcc runs. DeepGEMM (Hopper FP8)
+# JIT-compiles kernels at *runtime*, during KV-cache profiling — not just at
+# build time — and nvcc shells out to whatever g++ it finds. The node default is
+# pre-C++17, so nvcc silently drops its -std=c++20 flag and CCCL then fails with
+# "CUDA compiler and CUDA toolkit headers are incompatible" / "libcu++ requires
+# at least C++ 17". `module` is only available inside allocations, which is why
+# this belongs here and not in a login-node setup step.
+module load gcc 2>/dev/null || echo ">>> WARNING: 'module load gcc' failed; DeepGEMM JIT may fail on Hopper"
 
 export CUDA_HOME="$LCB_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
 export PATH="$CUDA_HOME/bin:$PATH"
+# Pin nvcc's host compiler explicitly rather than trusting PATH order — vLLM
+# spawns EngineCore as a subprocess and this survives into it.
+if command -v g++ >/dev/null 2>&1; then
+  export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-} -ccbin $(command -v g++)"
+  echo ">>> nvcc host compiler: $(command -v g++) ($(g++ -dumpversion 2>/dev/null))"
+fi
 # deep_gemm's compiled _C extension links against libnvrtc.so.13/libcudart.so.13
 # in cu13/lib, which aren't on the default runtime search path (pip's CUDA
 # packages ship versioned .so files only; we also added unversioned symlinks

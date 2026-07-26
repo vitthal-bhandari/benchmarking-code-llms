@@ -320,3 +320,151 @@ rather than something to fix under tonight's time constraint.
 Gemma4 vLLM server (`gpu-l40s`), Gemma4 agent driver × 20 instances
 (`cpu-g2`, `run_gemma4_20/`). Results pending — score both via `sb-cli
 submit swe-bench_verified test` once complete, same pattern as `smoke_run10`.
+
+### Results: 20 instances × 2 models — both 0/20 resolved
+
+| Model | Submitted | ContextWindowExceeded | RepeatedFormatError | ServiceUnavailable | Resolved |
+|---|---|---|---|---|---|
+| Qwen3.6-35B-A3B-FP8 | 16 | 3 | 0 | 1 | **0/20** |
+| Gemma4-26B-A4B (fp8 on load) | 11 | 3 | 6 | 0 | **0/20** |
+
+`sb-cli` reports (`sb-cli-reports/swe-bench_verified__test__run_{qwen,gemma4}_20.json`)
+both show `error_instances: 0` — evaluations ran cleanly; the patches simply
+didn't resolve. Note the schema is not as useful as hoped: `resolved_ids`,
+`unresolved_ids` and `error_ids` are all empty while `failed_ids` is a
+catch-all, so the report cannot distinguish "patch didn't apply" from "patch
+applied but tests failed". Also `completed_ids: []` is not a problem — in this
+schema it tracks *resolved* outcomes, not "evaluation finished".
+
+### RCA of the 0/40 (read all 40 trajectories)
+
+Three distinct failure classes, only one of which is about model capability:
+
+1. **Model capability — "plausible but not exact" (the real signal).** All 16
+   Qwen `Submitted` trajectories are small, targeted diffs (4–72 changed lines,
+   1–3 files) in the correct file for the PR description. Most show genuine
+   self-verification: the agent writes reproduction/edge-case scripts and gets
+   passing output before submitting (e.g. `astropy-7166` tested properties,
+   static/classmethods, multiple inheritance, magic and private methods — all
+   passing — then still failed the hidden tests). Effort scaled sensibly with
+   difficulty (26–77 API calls). Gemma4's 11 `Submitted` look equivalent, and
+   independently reached the *same* root-cause diagnosis as Qwen on
+   `astropy-12907` (`_cstack` mishandling ndarray args) — a good cross-model
+   consistency check. This is not a floundering agent; it is careful work that
+   misses SWE-Bench's exact-match bar against a withheld test patch.
+2. **Infra — `ContextWindowExceededError` (3 per model).** Purely our 65,536
+   cap. `astropy-13398`'s trajectory had correctly diagnosed the root cause and
+   was mid-fix when cut off. `astropy-13579` failed this way for *both* models,
+   confirming it tracks instance difficulty (more steps -> more accumulated
+   context, since a no-memory agent re-sends the whole trajectory each turn),
+   not a per-model quirk. Undercounts true capability, worst on hardest tasks.
+3. **Gemma4-specific — `RepeatedFormatError` (6/20, 30%).** Two sub-patterns:
+   (a) `finish_reason=length` — the model hit the per-turn *output* token limit
+   before emitting a tool call, then looped on retries (`astropy-13453` ballooned
+   to 172 API calls / 343 messages); (b) "No tool calls found". Likely common
+   cause: Gemma4 leaks literal `<|channel>thought <channel|>` reasoning tags
+   into `content` (visible even in its successful trajectories), eating the
+   output budget before reaching the tool call. Fixable — raise Gemma4's
+   per-turn output budget and/or find a vLLM reasoning-parser for that channel
+   format (same class of fix as `qwen3_coder` was for tool calls). Not evidence
+   Gemma4 is the weaker model.
+
+**Calibration vs. Qwen's published 73.4% on SWE-Bench Verified.** Not a
+like-for-like target and we should not present it as one: that number uses
+temp=1.0/top_p=0.95 and a 200K context (reporting a single score at high
+temperature implies multiple samples per instance, i.e. far more compute per
+task than our single rollout), and vendor numbers come from heavily-engineered
+scaffolds. Our harness is deliberately minimal `mini-swe-agent` (~100-line ReAct
+loop, raw bash) — which is exactly why the official mini-swe-agent leaderboard
+reports much lower numbers than vendor blogs for the same models. The project
+goal is an internally-consistent B0/B1/B2 ladder under one fixed harness so the
+memory contribution is attributable to memory, not scaffold sophistication.
+
+**Sampling config finding:** neither `api_override.yaml` nor the agent's saved
+config sets `temperature`/`top_p`, so requests fell through to the OpenAI-API
+default vLLM follows (1.0) — our runs were probably *not* greedy/deterministic.
+Decide explicitly before the next run (set `temperature: 0` for a clean
+single-shot capability measurement, or keep ~1.0 to stay near the blog's
+regime) and record the choice. Also confirmed not the bottleneck:
+`step_limit: 250` (max observed 172) and `cost_limit: 3.0` (zero-cost registry).
+
+`--workers` verified as genuine concurrency: mini-swe-agent uses a real
+`ThreadPoolExecutor(max_workers=...)`, and the heavy work is I/O-bound (HTTP to
+vLLM, Singularity subprocesses), so the GIL isn't a limiter. Measured
+throughput ~53 min for 5 instances at 4 workers (~3.5 h for 20) — well short of
+4x linear, consistent with contention for the single GPU's KV cache.
+
+### Environment rebuild incident (Jul 21) — and the fixes it forced
+
+`rm -rf .venv && uv sync` **destroyed the working environment.** The venv that
+had served Qwen3.6 all along was hand-assembled through many interactive pip
+commands that were never recorded in `uv.lock`/`install_venv.sh`, so the
+rebuild faithfully reinstalled the *original broken* pin set — silently
+reverting vLLM 0.21.0 -> 0.8.4 (no `qwen3_5_moe` support, incompatible
+fastapi/starlette). The trigger was real filesystem corruption from the 10 GB
+home-quota being exhausted (105 GB of duplicate HF model caches in
+`~/.cache/huggingface`, orphaned copies of models that were already correctly
+cached on scratch): it corrupted the uv package cache, the Python 3.11
+interpreter itself (`ModuleNotFoundError: No module named 'encodings'`), and
+eventually the git object database (54 `git fsck` errors; fixed by re-cloning
+and moving the working tree across, keeping `LiveCodeBench/.venv` intact).
+
+Fixes now captured in `scripts/install_venv.sh` and `requirements-working.txt`
+(a `pip freeze` of the known-good env — **re-run it after any interactive fix**):
+- `vllm==0.21.0` pinned, `--only-binary=:all:` (source build fails on the
+  llguidance/`alloca` Rust crate). It pulls compatible torch 2.11.0 itself.
+- `nvidia-cuda-nvcc` — nvcc was simply **absent** from the rebuilt venv
+  (`cu13/bin/` empty). This also retires an old red herring: the original LCB
+  "CUDA_HOME doesn't propagate into vLLM's spawned EngineCore" theory was
+  wrong — the error message printed the fully-resolved path, so propagation
+  worked; the file just wasn't there. (Package name note: `nvidia-cuda-nvcc-cu13`
+  is deprecated and fails by design.)
+- `nvidia-cuda-cccl` — supplies `<nv/target>`; without it any CUDA C++ compile
+  fails inside `cuda_fp16.h`.
+- Unversioned `libcudart.so`/`libnvrtc.so` symlinks in `cu13/lib` (pip ships
+  versioned-only) for link-time, plus `LD_LIBRARY_PATH="$CUDA_HOME/lib"` in
+  `serve_vllm.slurm` for run-time.
+- Removed the unconditional `pip install --upgrade prometheus-fastapi-instrumentator`
+  from `serve_vllm.slurm` (now behind `SKIP_PROM_UPGRADE`, default skip): on a
+  fresh consistent venv it *causes* breakage by pulling starlette>=1.0 past
+  fastapi's `<0.47` pin.
+
+### Context-window fix: `--kv-cache-dtype fp8` (validated)
+
+New `KV_CACHE_DTYPE` and `MAX_NUM_BATCHED_TOKENS` (Gemma4 multimodal) knobs in
+`serve_vllm.slurm`. `KV_CACHE_DTYPE=fp8` + `MAX_MODEL_LEN=131072` starts
+cleanly on a 48 GB L40S — roughly halves KV-cache bytes per token, doubling
+usable context on the same card. Note this is orthogonal to `--quantization`
+(weights). Caveat learned the hard way: a clean *startup* proves nothing here —
+the fp8 prefill kernel is JIT-compiled on the **first real request**, so always
+smoke-test with a curl before trusting a run.
+
+### H200 unlocked (DeepGEMM built)
+
+Serving Qwen3.6's pre-quantized FP8 checkpoint on Hopper needs DeepGEMM
+(`FlashInferFp8DeepGEMMDynamicBlockScaledKernel`); without it weight loading
+hard-fails. `pip install deep_gemm` cannot work (PyPI sdist omits its vendored
+CUTLASS submodule). Working route: vLLM's own
+`tools/install_deepgemm.sh` (clones `--recursive` at a pinned commit), run
+inside an allocation with `module load gcc` (GCC 9+; unavailable on login
+nodes) after the nvcc/cccl/symlink fixes above. A cheap `cpu-g2` allocation
+suffices — the build needs no GPU. Now wired into `install_venv.sh` behind
+`BUILD_DEEPGEMM=1`. Worth the effort strategically: the H200 nodes sit
+**idle** while every l40/l40s node is GPU-saturated, precisely because most
+users hit this software wall.
+
+### Hyak scheduling notes (Jul 21–25)
+
+- `sinfo` `mixed` means *some* resource free, not free GPUs — check
+  `sinfo -p <part> -N -O NodeList:12,StateCompact:8,Gres:14,GresUsed:22`.
+  `GresUsed ... IDX:0-7` = all 8 GPUs taken; `IDX:N/A` = none taken. Every
+  "mixed" l40/l40s node was in fact GPU-saturated.
+- Heavy usage depresses fair-share priority account-wide; jobs then sit at
+  `Reason=Priority` even beside genuinely idle nodes, and submitting *more*
+  tickets makes it worse. `squeue --start -j <id>` gives a real scheduled
+  start time once backfill plans the job.
+- Queueing several of our own jobs at once can self-block: four pending
+  8-CPU servers tripped `AssocGrpCpuLimit`, which flipped back to
+  `AssocGrpGRES` as soon as two were cancelled.
+- `--partition=compute` has no GPUs at all — `--gpus=...` there fails
+  instantly with "Requested node configuration is not available".
