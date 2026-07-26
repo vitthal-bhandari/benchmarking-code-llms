@@ -73,9 +73,58 @@ export HF_HUB_CACHE="$HF_HOME/hub"
 export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
 export TORCH_HOME="/gscratch/scrubbed/$USER/.cache/torch"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+# vLLM defaults its cache (incl. DeepGEMM's JIT kernel cache) to ~/.cache/vllm.
+# $HOME is capped at 10GB on Hyak and filling it corrupts things badly — keep
+# it on scratch like every other cache.
+export VLLM_CACHE_ROOT="/gscratch/scrubbed/$USER/.cache/vllm"
+mkdir -p "$VLLM_CACHE_ROOT"
+
+# A modern host compiler must be on PATH before nvcc runs. DeepGEMM (Hopper FP8)
+# JIT-compiles kernels at *runtime*, during KV-cache profiling — not just at
+# build time — and nvcc shells out to whatever g++ it finds. The node default
+# (/usr/bin/g++, GCC 8) predates C++20, so nvcc silently drops its -std=c++20
+# flag and CCCL then fails with "CUDA compiler and CUDA toolkit headers are
+# incompatible" / "libcu++ requires at least C++ 17".
+#
+# `module load gcc` is NOT reliable here: it works in an interactive salloc but
+# exits 0 without changing PATH in a non-interactive batch shell. Point at the
+# module tree's compiler directly instead; override with GCC_BIN if the path
+# changes. Verify with: ls -d /sw/gcc/*/bin
+GCC_BIN="${GCC_BIN:-/sw/gcc/11.2.0/bin}"
+if [ -x "$GCC_BIN/g++" ]; then
+  export PATH="$GCC_BIN:$PATH"
+else
+  echo ">>> WARNING: no g++ at $GCC_BIN — DeepGEMM JIT will fail on Hopper (H200)"
+fi
 
 export CUDA_HOME="$LCB_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
 export PATH="$CUDA_HOME/bin:$PATH"
+# Pin nvcc's host compiler explicitly rather than trusting PATH order — vLLM
+# spawns EngineCore as a subprocess and this survives into it.
+if command -v g++ >/dev/null 2>&1; then
+  export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-} -ccbin $(command -v g++)"
+  echo ">>> nvcc host compiler: $(command -v g++) ($(g++ -dumpversion 2>/dev/null))"
+fi
+# CCCL hard-errors unless nvcc's version exactly equals the CUDA runtime headers'
+# CUDART_VERSION ("CUDA compiler and CUDA toolkit headers are incompatible"). Our
+# venv has mixed CUDA 12 and 13 pip packages, so that check fails even though the
+# combination works. The header documents this define as the intended opt-out for
+# "a newer CTK than the compiler ships".
+export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-} -DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK"
+# deep_gemm's compiled _C extension links against libnvrtc.so.13/libcudart.so.13
+# in cu13/lib, which aren't on the default runtime search path (pip's CUDA
+# packages ship versioned .so files only; we also added unversioned symlinks
+# there for the link step of the DeepGEMM source build). Needed for FP8 weight
+# loading on Hopper (H200) — harmless elsewhere.
+export LD_LIBRARY_PATH="$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
+# pip's nvidia-cu13 package only ships cu13/lib, not the traditional cu13/lib64
+# — but some JIT-compiled kernels (e.g. Qwen3.6's GDN/linear-attention prefill
+# kernel, compiled by FlashInfer at first real use) hardcode -L.../lib64 and
+# silently fail to link (ld: cannot find -lcudart), non-fatal but forces a
+# slower fallback path with an explicit "may OOM due to autotuner" risk.
+# Symlinking the whole directory covers this and any similarly-affected future
+# kernel.
+[ -e "$CUDA_HOME/lib64" ] || ln -sf lib "$CUDA_HOME/lib64"
 # Native sampler — avoids FlashInfer nvcc JIT in the spawned EngineCore worker.
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # flashinfer-python and flashinfer-cubin got installed at mismatched versions
