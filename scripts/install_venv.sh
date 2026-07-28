@@ -31,7 +31,7 @@ LCB_DIR="$PROJECT_DIR/LiveCodeBench"
 
 export UV_CACHE_DIR="/gscratch/scrubbed/$USER/.cache/uv"
 
-# LCB recommends Python 3.11
+# LCB recommends Python 3.11 
 cd "$LCB_DIR"
 echo ">>> Creating venv with Python 3.11..."
 # --seed installs pip into the venv so the pip-based vLLM/bitsandbytes installs
