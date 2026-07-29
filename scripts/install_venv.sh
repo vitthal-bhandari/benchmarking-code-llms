@@ -13,7 +13,7 @@
 # because several manual pip steps had never been recorded here — the rebuild
 # silently reverted vLLM 0.21.0 -> 0.8.4 (the version pinned in uv.lock) and
 # broke Qwen3.6 support entirely. If you fix an env problem interactively,
-# add it here and re-run `pip freeze > requirements-working.txt`.
+# add it here and re-run `pip freeze > requirements-working.txt`. 
 #
 # Optional: set BUILD_DEEPGEMM=1 to also build DeepGEMM (needed only to serve
 # pre-quantized FP8 checkpoints on Hopper/H200; not needed on L40S/Ada).
