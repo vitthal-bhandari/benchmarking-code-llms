@@ -11,7 +11,7 @@
 # =============================================================================
 # run_swebench_agent.slurm — drives mini-swe-agent against an already-running
 # vllm_serve job. CPU-only: this job just makes HTTP calls to the vLLM server
-# and builds/runs Singularity sandboxes; it does not need a GPU itself. 
+# and builds/runs Singularity sandboxes; it does not need a GPU itself.
 #
 # Prerequisite: a serve_vllm.slurm job must already be RUNNING (check with
 # `squeue --me`) and api_override.yaml must point at its node.
