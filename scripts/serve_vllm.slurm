@@ -35,7 +35,7 @@ set -euo pipefail
 
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.6-35B-A3B-FP8}"
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.6-35B-A3B}"
 PORT="${PORT:-8000}"
 # Default 65536 is safe on any GPU. On H200 (141GB) you can go to the model's
 # native max (e.g. 262144 for Qwen3.6) with plenty of KV-cache headroom.

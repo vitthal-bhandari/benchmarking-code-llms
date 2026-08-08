@@ -16,8 +16,11 @@
 # any interactive fix. Do NOT `uv sync` the serving env: it reverts vLLM to a
 # pinned-but-broken version that doesn't recognize Qwen3.6 (qwen3_5_moe).
 #
-# Set BUILD_DEEPGEMM=1 (default here) to build DeepGEMM — required to serve
-# pre-quantized FP8 checkpoints (Qwen3.6) on Hopper/H200.
+# Default is full-weights (BF16) models, which don't need DeepGEMM at all — on
+# H200's 141GB there's no need to fight FP8 for memory the way L40S required.
+# Set BUILD_DEEPGEMM=1 only if you specifically need to serve a pre-quantized
+# FP8 checkpoint (e.g. a *-FP8 repo) on Hopper — it JIT-compiles a CUDA kernel
+# from source and was the single biggest source of setup pain on Klone.
 # =============================================================================
 
 set -euo pipefail
@@ -77,7 +80,7 @@ if [ -d "$NVIDIA_DIR/cu13/lib" ]; then
   [ -e "$NVIDIA_DIR/cu13/lib64" ] || ln -sf lib "$NVIDIA_DIR/cu13/lib64"
 fi
 
-if [ "${BUILD_DEEPGEMM:-1}" = "1" ]; then
+if [ "${BUILD_DEEPGEMM:-0}" = "1" ]; then
   echo ">>> [.venv] Building DeepGEMM (Hopper/H200 FP8 support)..."
   # Needed to serve pre-quantized FP8 checkpoints on Hopper. Don't
   # `pip install deep_gemm` — the PyPI sdist omits its CUTLASS submodule.

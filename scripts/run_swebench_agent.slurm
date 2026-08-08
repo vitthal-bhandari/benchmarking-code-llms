@@ -10,13 +10,17 @@
 #SBATCH --error=logs/%x_%j.err
 # =============================================================================
 # run_swebench_agent.slurm — drives mini-swe-agent against an already-running
-# vllm_serve job (Tillicum). Makes HTTP calls to the vLLM server and builds/runs
-# Apptainer sandboxes; it does not use a GPU itself.
+# vllm_serve job. Makes HTTP calls to the vLLM server and builds/runs Apptainer
+# sandboxes; it does not use a GPU itself.
 #
-# NOTE on Tillicum billing: this is a multi-hour job on a GPU cluster billed by
-# usage. If a bare CPU job still draws GPU credits, consider co-locating server
-# + driver in one GPU job instead (see README). Preemption is NOT a concern —
-# Tillicum has no checkpoint queue.
+# NOT SUBMITTABLE AS-IS ON TILLICUM: "CPU-only jobs are not allowed" — every
+# job needs --gres=gpu:h200:1+. For full scored runs, use
+# scripts/serve_and_run_swebench.slurm instead, which starts the server and
+# drives it in one GPU job (so the driver doesn't silently bill a second GPU
+# it never uses). This script is kept for clusters that do allow CPU-only jobs
+# (it was the original two-job Klone pattern), or as a reference for manually
+# driving an already-running interactive serve_vllm.slurm session on Tillicum
+# by adding --gres=gpu:h200:1 yourself (accept the extra GPU-hour cost).
 #
 # Prerequisite: a serve_vllm.slurm job is RUNNING and configs/api_override.yaml
 # points at its node.
@@ -41,7 +45,7 @@ PROJECT_DIR="/gpfs/projects/stf/$USER/benchmarking-code-llms"
 mkdir -p "$PROJECT_DIR/logs"
 cd "$PROJECT_DIR"
 
-MODEL_NAME="${MODEL_NAME:-hosted_vllm/Qwen/Qwen3.6-35B-A3B-FP8}"
+MODEL_NAME="${MODEL_NAME:-hosted_vllm/Qwen/Qwen3.6-35B-A3B}"
 SLICE="${SLICE:-0:20}"
 WORKERS="${WORKERS:-4}"
 OUTPUT_DIR="${OUTPUT_DIR:-runs/run_$(date +%Y%m%d_%H%M%S)}"
