@@ -3,7 +3,7 @@
 #SBATCH --account=stf
 #SBATCH --qos=normal
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --gres=gpu:h200:1
 #SBATCH --time=12:00:00
@@ -16,6 +16,10 @@
 # Tillicum uses QoS (not partitions) and has NO checkpoint/preemptible queue,
 # so this server won't be killed mid-run. GPUs are requested with
 # --gres=gpu:h200:1.
+#
+# Tillicum nodes are provisioned at a fixed 8 CPUs / 200GB RAM PER GPU
+# requested — sbatch rejects any job exceeding that ratio (not a soft limit).
+# For 1 GPU: max 8 CPUs, max 200GB RAM. Request more GPUs to get more of either.
 #
 # Usage:
 #   sbatch scripts/serve_vllm.slurm                                  # Qwen3.6 default
