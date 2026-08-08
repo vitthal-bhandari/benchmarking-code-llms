@@ -22,10 +22,12 @@
 #   sbatch --export=SLICE="0:500",WORKERS=4,OUTPUT_DIR=full_qwen36 \
 #          scripts/run_swebench_agent.slurm
 #   # running a second model against its own server, in parallel:
-#   sbatch --export=MODEL_NAME="hosted_vllm/poolside/Laguna-XS.2-NVFP4",\
-#          TOOL_CALL_PARSER=poolside_v1,API_OVERRIDE=api_override_poolside.yaml,\
-#          SLICE="0:20",WORKERS=4,OUTPUT_DIR=run_poolside_20 \
+#   sbatch --export=MODEL_NAME="hosted_vllm/google/gemma-4-26B-A4B-it",\
+#          API_OVERRIDE=configs/api_override_gemma4.yaml,\
+#          SLICE="0:20",WORKERS=4,OUTPUT_DIR=runs/run_gemma4_20 \
 #          scripts/run_swebench_agent.slurm
+#
+# Outputs go to OUTPUT_DIR (put new runs under runs/, which is gitignored).
 # =============================================================================
 
 set -euo pipefail
@@ -40,7 +42,7 @@ MODEL_NAME="${MODEL_NAME:-hosted_vllm/Qwen/Qwen3.6-35B-A3B-FP8}"
 SLICE="${SLICE:-0:20}"
 WORKERS="${WORKERS:-4}"
 OUTPUT_DIR="${OUTPUT_DIR:-run_$(date +%Y%m%d_%H%M%S)}"
-API_OVERRIDE="${API_OVERRIDE:-api_override.yaml}"
+API_OVERRIDE="${API_OVERRIDE:-configs/api_override.yaml}"
 
 source agent-venv/bin/activate
 
@@ -70,7 +72,7 @@ echo ">>> Output: $OUTPUT_DIR"
 echo ">>> $API_OVERRIDE points at:"
 grep api_base "$API_OVERRIDE"
 
-LITELLM_MODEL_REGISTRY_PATH=registry.json mini-extra swebench \
+LITELLM_MODEL_REGISTRY_PATH=configs/registry.json mini-extra swebench \
   -m "$MODEL_NAME" \
   -c swebench.yaml -c "$API_OVERRIDE" \
   --subset verified --split test --slice "$SLICE" \
