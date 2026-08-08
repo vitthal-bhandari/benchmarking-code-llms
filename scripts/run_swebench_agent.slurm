@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=swebench_agent
 #SBATCH --account=stf
-#SBATCH --partition=cpu-g2
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
@@ -10,67 +10,64 @@
 #SBATCH --error=logs/%x_%j.err
 # =============================================================================
 # run_swebench_agent.slurm — drives mini-swe-agent against an already-running
-# vllm_serve job. CPU-only: this job just makes HTTP calls to the vLLM server
-# and builds/runs Singularity sandboxes; it does not need a GPU itself.
+# vllm_serve job (Tillicum). Makes HTTP calls to the vLLM server and builds/runs
+# Apptainer sandboxes; it does not use a GPU itself.
 #
-# Prerequisite: a serve_vllm.slurm job must already be RUNNING (check with
-# `squeue --me`) and api_override.yaml must point at its node.
+# NOTE on Tillicum billing: this is a multi-hour job on a GPU cluster billed by
+# usage. If a bare CPU job still draws GPU credits, consider co-locating server
+# + driver in one GPU job instead (see README). Preemption is NOT a concern —
+# Tillicum has no checkpoint queue.
+#
+# Prerequisite: a serve_vllm.slurm job is RUNNING and configs/api_override.yaml
+# points at its node.
 #
 # Usage:
-#   sbatch --export=SLICE="0:20",WORKERS=4,OUTPUT_DIR=validate_run1 \
+#   sbatch --export=SLICE="0:20",WORKERS=4,OUTPUT_DIR=runs/run_qwen_20 \
 #          scripts/run_swebench_agent.slurm
-#   sbatch --export=SLICE="0:500",WORKERS=4,OUTPUT_DIR=full_qwen36 \
-#          scripts/run_swebench_agent.slurm
-#   # running a second model against its own server, in parallel:
+#   # a second model against its own server:
 #   sbatch --export=MODEL_NAME="hosted_vllm/google/gemma-4-26B-A4B-it",\
 #          API_OVERRIDE=configs/api_override_gemma4.yaml,\
 #          SLICE="0:20",WORKERS=4,OUTPUT_DIR=runs/run_gemma4_20 \
 #          scripts/run_swebench_agent.slurm
 #
-# Outputs go to OUTPUT_DIR (put new runs under runs/, which is gitignored).
+# Put new runs under runs/ (gitignored).
 # =============================================================================
 
 set -euo pipefail
 
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
-PROJECT_DIR="/gscratch/scrubbed/$USER/benchmarking-code-llms"
+PROJECT_DIR="/gpfs/projects/stf/$USER/benchmarking-code-llms"
 mkdir -p "$PROJECT_DIR/logs"
 cd "$PROJECT_DIR"
 
 MODEL_NAME="${MODEL_NAME:-hosted_vllm/Qwen/Qwen3.6-35B-A3B-FP8}"
 SLICE="${SLICE:-0:20}"
 WORKERS="${WORKERS:-4}"
-OUTPUT_DIR="${OUTPUT_DIR:-run_$(date +%Y%m%d_%H%M%S)}"
+OUTPUT_DIR="${OUTPUT_DIR:-runs/run_$(date +%Y%m%d_%H%M%S)}"
 API_OVERRIDE="${API_OVERRIDE:-configs/api_override.yaml}"
+
+# Keep the SWE-Bench dataset cache off the 10GB home quota.
+export HF_HOME="/gpfs/scrubbed/$USER/.cache/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub"
+mkdir -p "$HF_HUB_CACHE"
 
 source agent-venv/bin/activate
 
 export MSWEA_COST_TRACKING='ignore_errors'
 
-# Hyak routes outbound HTTP through a Squid proxy (klone-dip1) by default,
-# including requests between two compute nodes on the cluster's own internal
-# network. When the proxy fails to forward, litellm surfaces a Squid error
-# page as ServiceUnavailableError — pure network flakiness, not a model bug.
-#
-# CRITICAL: httpx (which litellm uses) matches NO_PROXY by STRING, and does NOT
-# resolve a hostname to an IP to test it against a CIDR. So a CIDR like
-# 10.64.0.0/16 only bypasses requests written as raw IPs — it does NOTHING for
-# an api_base written as a hostname (http://g3128:8000/v1). That silent
-# mismatch sent every request back through the flaky proxy (18/20 failures in
-# run_gemma4_20_h200_n2). Fix: pull the actual host out of the api_base and add
-# it verbatim to no_proxy so the bypass matches whatever node we're on.
+# If the cluster routes outbound HTTP through a proxy, bypass it for the vLLM
+# server. httpx matches NO_PROXY by STRING and won't resolve a hostname against
+# a CIDR, so we add the api_base host VERBATIM (a bare CIDR silently failed to
+# bypass a hostname api_base on Klone, sending requests through a flaky Squid
+# proxy). Harmless if Tillicum has no proxy.
 API_HOST="$(grep -oE 'https?://[^:/]+' "$API_OVERRIDE" | head -1 | sed -E 's#https?://##')"
-export NO_PROXY="${API_HOST},10.64.0.0/16,localhost,127.0.0.1"
+export NO_PROXY="${API_HOST},localhost,127.0.0.1"
 export no_proxy="$NO_PROXY"
 echo ">>> no_proxy set to: $NO_PROXY  (api host parsed: ${API_HOST:-NONE})"
 
-echo ">>> Model: $MODEL_NAME"
-echo ">>> Slice: $SLICE"
-echo ">>> Workers: $WORKERS"
-echo ">>> Output: $OUTPUT_DIR"
-echo ">>> $API_OVERRIDE points at:"
-grep api_base "$API_OVERRIDE"
+echo ">>> Model: $MODEL_NAME | Slice: $SLICE | Workers: $WORKERS | Output: $OUTPUT_DIR"
+echo ">>> $API_OVERRIDE points at:"; grep api_base "$API_OVERRIDE"
 
 LITELLM_MODEL_REGISTRY_PATH=configs/registry.json mini-extra swebench \
   -m "$MODEL_NAME" \

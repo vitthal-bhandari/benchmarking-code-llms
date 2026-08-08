@@ -1,139 +1,119 @@
 #!/bin/bash
 # =============================================================================
-# install_venv.sh — Install uv venv + LCB + vLLM
+# install_venv.sh — Build the two project venvs on Tillicum (UW RCC H200).
 #
-# Run INSIDE a gpu-l40s salloc session (vLLM needs CUDA at install time):
-#   salloc -A stf -p gpu-l40s -N 1 -c 8 --mem=32G --gpus=1 -t 01:00:00
+#   .venv        serving env (vLLM 0.21.0) — used by scripts/serve_vllm.slurm
+#   agent-venv   mini-swe-agent + sb-cli    — used by run_swebench_agent.slurm
+#
+# Run INSIDE a Tillicum GPU allocation (vLLM needs CUDA present at install; the
+# DeepGEMM build needs nvcc + a modern gcc from the module system):
+#   salloc -A stf --qos=normal --gres=gpu:h200:1 -c 16 --mem=64G -t 02:00:00
 #   bash scripts/install_venv.sh
 #
-# IMPORTANT — this script is the reproducible recipe; keep it in sync with
-# reality. `requirements-working.txt` (pip freeze of a known-good env) is the
-# authoritative snapshot; this script is the narrative version of how to get
-# there. On Jul 2026 a `rm -rf .venv && uv sync` wiped a hand-assembled env
-# because several manual pip steps had never been recorded here — the rebuild
-# silently reverted vLLM 0.21.0 -> 0.8.4 (the version pinned in uv.lock) and
-# broke Qwen3.6 support entirely. If you fix an env problem interactively,
-# add it here and re-run `pip freeze > requirements-working.txt`. 
+# This script IS the reproducible recipe — keep it in sync with reality.
+# requirements-working.txt (a pip freeze of a known-good serving env) is the
+# authoritative snapshot; re-run `pip freeze > requirements-working.txt` after
+# any interactive fix. Do NOT `uv sync` the serving env: it reverts vLLM to a
+# pinned-but-broken version that doesn't recognize Qwen3.6 (qwen3_5_moe).
 #
-# Optional: set BUILD_DEEPGEMM=1 to also build DeepGEMM (needed only to serve
-# pre-quantized FP8 checkpoints on Hopper/H200; not needed on L40S/Ada).
-# That step needs a modern GCC via `module load gcc`, which is unavailable on
-# login nodes — run inside an allocation (a cheap cpu-g2 one is fine; the
-# build itself does not need a GPU).
+# Set BUILD_DEEPGEMM=1 (default here) to build DeepGEMM — required to serve
+# pre-quantized FP8 checkpoints (Qwen3.6) on Hopper/H200.
 # =============================================================================
 
 set -euo pipefail
 
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
-PROJECT_DIR="/gscratch/scrubbed/$USER/benchmarking-code-llms"
-LCB_DIR="$PROJECT_DIR/LiveCodeBench"
+PROJECT_DIR="/gpfs/projects/stf/$USER/benchmarking-code-llms"
+export UV_CACHE_DIR="/gpfs/scrubbed/$USER/.cache/uv"
+mkdir -p "$UV_CACHE_DIR"
+cd "$PROJECT_DIR"
 
-export UV_CACHE_DIR="/gscratch/scrubbed/$USER/.cache/uv"
+# Tillicum ships a CUDA-13 toolkit + modern gcc as modules. We still install a
+# self-contained pip CUDA toolkit into the venv (proven, cluster-agnostic), and
+# use the module gcc only as the host compiler for JIT/DeepGEMM builds.
+module load gcc/11.5.0 2>/dev/null || echo ">>> WARNING: could not module-load gcc/11.5.0 (check 'module avail gcc')"
 
-# LCB recommends Python 3.11 
-cd "$LCB_DIR"
-echo ">>> Creating venv with Python 3.11..."
-# --seed installs pip into the venv so the pip-based vLLM/bitsandbytes installs
-# below work (uv venv omits pip by default). The pip route for vLLM is
-# deliberate — it avoids a uv/GPFS flashinfer-cubin copy failure on scrubbed.
-uv venv --python 3.11 --seed
+# ── Serving venv ─────────────────────────────────────────────────────────────
+echo ">>> [.venv] Creating serving venv with Python 3.11..."
+# --seed installs pip so the pip-based CUDA/vLLM installs below work.
+uv venv --python 3.11 --seed .venv
 source .venv/bin/activate
 
-echo ">>> Pinning transformers to git source in LCB pyproject.toml..."
-# Rewrites LCB's transformers requirement to the git URL so uv never reverts our
-# source build (needed for qwen3_5_moe) on a later `uv run`/`uv sync`. Idempotent.
-python "$PROJECT_DIR/lcb_patch/pin_transformers.py" --lcb-dir "$LCB_DIR"
-
-echo ">>> Installing LCB dependencies..."
-uv pip install -e .
-
-echo ">>> Installing vLLM 0.21.0 (CUDA build) via pip --no-cache-dir..."
-# Use pip (not uv pip) to avoid a GPFS cross-path copy failure that hits
-# flashinfer-cubin's extremely long filenames on Hyak's scrubbed filesystem.
-# --no-cache-dir forces pip to extract to a tmp dir and move atomically.
-#
-# PIN 0.21.0 EXACTLY. The old ">=0.8.0" resolved to 0.8.4, which does not
-# recognize Qwen3.6's qwen3_5_moe architecture and ships an incompatible
-# fastapi/starlette pair (TypeError: Router.__init__() got an unexpected
-# keyword argument 'on_startup' at `vllm serve` startup).
-#
-# --only-binary=:all: forces wheels: building from source fails on the
-# llguidance dependency (broken `alloca v0.4.0` Rust crate).
-#
-# 0.21.0 pulls a compatible torch (2.11.0) as its own dependency — no separate
-# torch force-reinstall step is needed (an earlier "NCCL undefined symbol"
-# workaround was really just vLLM/torch version skew).
+echo ">>> [.venv] Installing vLLM 0.21.0 (wheels only)..."
+# Pin 0.21.0 exactly: ">=0.8" resolves to 0.8.4, which doesn't recognize
+# qwen3_5_moe and ships an incompatible fastapi/starlette. --only-binary avoids
+# a source build that fails on the llguidance/alloca Rust crate. 0.21.0 pulls a
+# compatible torch (2.11.0) itself — no separate torch reinstall needed.
 pip install "vllm==0.21.0" --only-binary=:all: --no-cache-dir
 
-echo ">>> Installing CUDA toolkit pieces pip splits into separate packages..."
-# vLLM's dependency tree brings CUDA *runtime* libs but NOT the compiler or the
-# C++ core headers. Both are needed because FlashInfer JIT-compiles some kernels
-# on first use (notably the bf16-query/fp8-KV-cache prefill kernel when serving
-# with --kv-cache-dtype fp8) and dies at runtime without nvcc.
-#   - nvidia-cuda-nvcc  : provides nvcc at nvidia/cu13/bin/nvcc (the path
-#                         serve_vllm.slurm sets CUDA_HOME to). NOTE the package
-#                         name: `nvidia-cuda-nvcc-cu13` is deprecated and its
-#                         install intentionally fails.
-#   - nvidia-cuda-cccl  : provides <nv/target> etc. under cu13/include/cccl;
-#                         without it any CUDA C++ compile fails on cuda_fp16.h.
+echo ">>> [.venv] Installing CUDA toolkit pieces pip splits out..."
+# vLLM brings CUDA *runtime* libs but not the compiler/headers, which FlashInfer
+# and DeepGEMM need to JIT-compile kernels at runtime.
+#   nvidia-cuda-nvcc : nvcc at .venv/.../nvidia/cu13/bin (CUDA_HOME in serve script).
+#                      NB: the "-cu13"-suffixed package is deprecated and fails.
+#   nvidia-cuda-cccl : <nv/target> etc. under cu13/include/cccl.
 pip install nvidia-cuda-nvcc nvidia-cuda-cccl --no-cache-dir
 
-echo ">>> Installing bitsandbytes (for Devstral INT8 fallback)..."
+echo ">>> [.venv] Installing bitsandbytes (INT8 fallback for some models)..."
 pip install bitsandbytes --no-cache-dir
 
-echo ">>> Installing transformers from source (PyPI release lacks qwen3_5_moe and other new archs)..."
-# The latest PyPI transformers does NOT yet recognize qwen3_5_moe (Qwen3.6 FP8).
-# vLLM loads model configs via AutoConfig.from_pretrained, so transformers must
-# know the arch. Install from git; run this AFTER vLLM so it isn't downgraded.
-uv pip install --upgrade --no-cache-dir "git+https://github.com/huggingface/transformers.git"
+echo ">>> [.venv] Installing transformers from git (PyPI lacks qwen3_5_moe)..."
+# Must run AFTER vLLM so vLLM doesn't downgrade it.
+pip install --upgrade --no-cache-dir "git+https://github.com/huggingface/transformers.git"
 
-NVIDIA_DIR="$LCB_DIR/.venv/lib/python3.11/site-packages/nvidia"
+NVIDIA_DIR="$PROJECT_DIR/.venv/lib/python3.11/site-packages/nvidia"
 
-echo ">>> Adding unversioned .so symlinks for CUDA libs..."
-# pip's CUDA packages ship only versioned libraries (libcudart.so.13), but the
-# linker resolves -lcudart / -lnvrtc via the unversioned name. Needed for any
-# from-source CUDA build against this venv (e.g. DeepGEMM below). Harmless
-# otherwise. Runtime loading additionally needs cu13/lib on LD_LIBRARY_PATH —
-# scripts/serve_vllm.slurm exports that.
+echo ">>> [.venv] Adding unversioned .so symlinks + lib64 for CUDA libs..."
+# pip CUDA packages ship versioned-only libs (libcudart.so.13); the linker wants
+# the unversioned name, and some JIT builds hardcode -L.../lib64 (absent in pip
+# layout). Both are needed for from-source CUDA builds (DeepGEMM, GDN kernel).
 if [ -d "$NVIDIA_DIR/cu13/lib" ]; then
   ( cd "$NVIDIA_DIR/cu13/lib" \
     && for lib in libcudart libnvrtc; do
          target=$(ls -1 "$lib".so.[0-9]* 2>/dev/null | head -1)
          [ -n "$target" ] && ln -sf "$target" "$lib.so"
        done )
+  [ -e "$NVIDIA_DIR/cu13/lib64" ] || ln -sf lib "$NVIDIA_DIR/cu13/lib64"
 fi
 
-if [ "${BUILD_DEEPGEMM:-0}" = "1" ]; then
-  echo ">>> Building DeepGEMM (Hopper/H200 FP8 support)..."
-  # Only needed to serve pre-quantized FP8 checkpoints on Hopper: vLLM selects
-  # FlashInferFp8DeepGEMMDynamicBlockScaledKernel there and hard-fails weight
-  # loading with "DeepGEMM backend is not available or outdated" without it.
-  # Ada/L40S uses a different kernel path and does not need this at all.
-  #
-  # Don't `pip install deep_gemm` — the PyPI sdist omits its vendored CUTLASS
-  # submodule and cannot build. vLLM's installer clones --recursive at a pinned
-  # commit, which is the only reliable route.
-  #
-  # Requires GCC 9+ (`module load gcc`; unavailable on login nodes) and nvcc on
-  # PATH. TORCH_CUDA_ARCH_LIST targets Hopper without needing a GPU present.
+if [ "${BUILD_DEEPGEMM:-1}" = "1" ]; then
+  echo ">>> [.venv] Building DeepGEMM (Hopper/H200 FP8 support)..."
+  # Needed to serve pre-quantized FP8 checkpoints on Hopper. Don't
+  # `pip install deep_gemm` — the PyPI sdist omits its CUTLASS submodule.
+  # vLLM's installer clones --recursive at a pinned commit.
   export CUDA_HOME="$NVIDIA_DIR/cu13"
   export PATH="$CUDA_HOME/bin:$PATH"
   export LD_LIBRARY_PATH="$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
-  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a}"
+  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a}"   # Hopper sm_90a
+  # nvcc's version check vs the pip CCCL headers can mismatch; the header
+  # documents this opt-out. gcc from the module is the host compiler.
+  export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-} -DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK"
   curl -fsSL -o /tmp/install_deepgemm.sh \
     https://raw.githubusercontent.com/vllm-project/vllm/main/tools/install_deepgemm.sh
   bash /tmp/install_deepgemm.sh
   python -c "import deep_gemm; print('deep_gemm: OK')"
 fi
 
-echo ">>> Sanity check..."
+echo ">>> [.venv] Sanity check..."
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
 python -c "import vllm; print('vLLM:', vllm.__version__)"
 python -c "import transformers; print('transformers:', transformers.__version__)"
-python -c "from lcb_runner.lm_styles import LanguageModelStore; print('LCB models registered:', len(LanguageModelStore))"
-ls -l "$NVIDIA_DIR/cu13/bin/nvcc" 2>/dev/null || echo "  WARNING: nvcc missing — FlashInfer JIT kernels will fail at runtime"
+ls -l "$NVIDIA_DIR/cu13/bin/nvcc" >/dev/null 2>&1 || echo "  WARNING: nvcc missing — FlashInfer JIT kernels will fail at runtime"
+deactivate
+
+# ── Agent venv ───────────────────────────────────────────────────────────────
+echo ">>> [agent-venv] Creating driver venv (mini-swe-agent + sb-cli)..."
+uv venv --python 3.11 --seed agent-venv
+source agent-venv/bin/activate
+# litellm's completion() eagerly imports MCP/proxy code needing fastapi+orjson,
+# so pull the full proxy extra even though we only use the plain client.
+pip install --no-cache-dir mini-swe-agent "litellm[proxy]" fastapi sb-cli
+python -c "import minisweagent; print('mini-swe-agent OK')"
+deactivate
 
 echo ""
-echo ">>> Setup complete. venv at $LCB_DIR/.venv"
-echo ">>> Snapshot this environment:  pip freeze > $PROJECT_DIR/requirements-working.txt"
+echo ">>> Setup complete."
+echo ">>>   serving env : $PROJECT_DIR/.venv"
+echo ">>>   agent env   : $PROJECT_DIR/agent-venv"
+echo ">>> Snapshot serving env:  source .venv/bin/activate && pip freeze > requirements-working.txt"
