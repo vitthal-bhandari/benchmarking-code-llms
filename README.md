@@ -29,55 +29,82 @@ are heavy and reproducible, so they stay local.
 
 - Slurm uses **QoS, not partitions** (`--qos=normal`), account `-A stf`, GPUs via
   `--gres=gpu:h200:1`. **No preemption** (no checkpoint queue).
-- Storage: code + venvs in `/gpfs/projects/stf/$USER/benchmarking-code-llms`;
-  HF/torch/vLLM caches in `/gpfs/scrubbed/$USER/.cache/*`; `$HOME` is only 10 GB.
-- Toolchain via modules: `module load gcc/11.5.0 cuda/13.0.0`.
+- **Every job must request >=1 GPU — CPU-only jobs are rejected outright.**
+  Fixed ratio: max **8 CPUs / 200GB RAM per GPU requested**; sbatch hard-fails
+  over that, it's not a soft limit.
+- Storage: code + venvs in `/gpfs/projects/stf/$USER/benchmarking-code-llms`
+  (backed up); HF/torch/vLLM caches in `/gpfs/scrubbed/$USER/.cache/*` (large,
+  purged after 60 days idle — fine for regenerable weights, don't put anything
+  else there); `$HOME` is only 10GB, avoid it entirely.
+- Toolchain via modules: `module load gcc/11.5.0`.
 
 ## Setup (one-time, in a GPU allocation)
 
 ```bash
-salloc -A stf --qos=normal --gres=gpu:h200:1 -c 16 --mem=64G -t 02:00:00
+salloc -A stf --qos=normal --gres=gpu:h200:1 -c 8 --mem=64G -t 02:00:00
 cd /gpfs/projects/stf/$USER/benchmarking-code-llms
 bash scripts/install_venv.sh          # builds .venv (serving) + agent-venv (driver)
 ```
 
 `.venv` is hand-assembled (vLLM 0.21.0 + transformers-from-git + a self-contained
-pip CUDA toolkit + DeepGEMM for H200 FP8). **Do not `uv sync` it** — that reverts
-vLLM to a version that breaks Qwen3.6 (see the header in `install_venv.sh`).
-`requirements-working.txt` is the exact known-good snapshot.
+pip CUDA toolkit). **Do not `uv sync` it** — that reverts vLLM to a version that
+breaks Qwen3.6 (see the header in `install_venv.sh`). `requirements-working.txt`
+is the exact known-good snapshot.
+
+Default models are **full-weights (BF16)**, not FP8 — H200's 141GB has no need
+for the memory-driven quantization Klone's 48GB L40S required, and full weights
+avoid DeepGEMM (a from-source CUDA build, the single biggest setup risk on
+Klone) entirely. Download weights from the **login node** (no GPU billing) to
+`/gpfs/scrubbed`, not home:
+
+```bash
+source .venv/bin/activate
+export HF_HOME=/gpfs/scrubbed/$USER/.cache/huggingface
+hf download Qwen/Qwen3.6-35B-A3B
+hf download google/gemma-4-26B-A4B-it
+```
 
 ## Pipeline (SWE-Bench Verified, B1 agent)
 
-Two jobs: a GPU job serving the model, and a driver job running the agent.
+**One job** serves the model and drives the agent together (Tillicum disallows
+a separate CPU-only driver job, and a second GPU-billed job just to make HTTP
+calls would double cost for nothing):
 
 ```bash
-# 1. Serve the model.
-sbatch --export=MAX_MODEL_LEN=262144 scripts/serve_vllm.slurm
-squeue --me                                          # note the node
-grep "Application startup complete" logs/vllm_serve_<jobid>.out
-
-# 2. Point the agent at that node, then drive it over the benchmark.
-cp configs/api_override.example.yaml configs/api_override.yaml   # set api_base -> node
 sbatch --export=SLICE="0:20",WORKERS=4,OUTPUT_DIR=runs/run_qwen_20 \
-  scripts/run_swebench_agent.slurm
+  scripts/serve_and_run_swebench.slurm
+# actual dir gets the job id appended: runs/run_qwen_20_<jobid>/ (so repeated
+# runs stay distinct). The job log prints the resolved path; or: ls -dt runs/*
 
-# 3. Score the predictions (needs SWEBENCH_API_KEY; sb-cli is in agent-venv).
+# Score once it finishes (needs SWEBENCH_API_KEY; sb-cli is in agent-venv).
 source agent-venv/bin/activate
+RUN=run_qwen_20_<jobid>
 sb-cli submit swe-bench_verified test \
-  --predictions_path runs/run_qwen_20/preds.json --run_id run_qwen_20
+  --predictions_path runs/$RUN/preds.json --run_id $RUN
 ```
 
-Run a second model (e.g. Gemma4) by serving it with its own
-`TOOL_CALL_PARSER`/`api_override_gemma4.yaml` and passing `MODEL_NAME` +
-`API_OVERRIDE` to the driver — see the script headers.
+Run a second model (e.g. Gemma4) as its own job — it gets its own GPU and runs
+in parallel:
+
+```bash
+sbatch --export=MODEL_NAME="google/gemma-4-26B-A4B-it",TOOL_CALL_PARSER=gemma4,\
+  MAX_NUM_BATCHED_TOKENS=4096,AGENT_MODEL_NAME="hosted_vllm/google/gemma-4-26B-A4B-it",\
+  SLICE="0:20",WORKERS=4,OUTPUT_DIR=runs/run_gemma4_20 \
+  scripts/serve_and_run_swebench.slurm
+```
+
+`serve_vllm.slurm` also still exists standalone, for interactive debugging (a
+long-lived server you `curl`/iterate against) — that use case is worth its own
+GPU; full scored runs should go through `serve_and_run_swebench.slurm`.
 
 ## Scripts
 
 | Script | Purpose |
 |---|---|
-| `install_venv.sh` | Build both venvs (`BUILD_DEEPGEMM=1` default, for H200 FP8) |
-| `serve_vllm.slurm` | vLLM OpenAI-compatible server (per-model flags in the header) |
-| `run_swebench_agent.slurm` | Drives mini-swe-agent over SWE-Bench Verified against the server |
+| `install_venv.sh` | Build both venvs (`BUILD_DEEPGEMM=1` only if serving an FP8 checkpoint) |
+| `serve_and_run_swebench.slurm` | **Primary path**: one GPU job, serves + drives against localhost |
+| `serve_vllm.slurm` | Standalone server, for interactive debugging only (see above) |
+| `run_swebench_agent.slurm` | Standalone driver — not directly submittable on Tillicum (0-GPU); kept for reference |
 
-Cluster-specific details (QoS, GPU flags, CUDA/JIT toolchain, proxy handling)
-are documented inline in each script and in `plan.md`.
+Cluster-specific details (QoS, GPU ratio, CUDA/JIT toolchain) are documented
+inline in each script and in `plan.md`.
