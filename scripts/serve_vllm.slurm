@@ -98,6 +98,10 @@ source .venv/bin/activate
 QUANT_ARGS=(); [ -n "$QUANTIZATION" ] && QUANT_ARGS=(--quantization "$QUANTIZATION")
 BATCH_ARGS=(); [ -n "$MAX_NUM_BATCHED_TOKENS" ] && BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
 KV_CACHE_ARGS=(); [ -n "$KV_CACHE_DTYPE" ] && KV_CACHE_ARGS=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+# Text-only workload on a vision-language model: cap images at 0 so vLLM skips
+# the multimodal encoder warmup (it hung 28 min on Tillicum). Override LIMIT_MM="".
+if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0}'; fi
+MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
 
 echo ">>> Serving $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
 echo ">>> gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: $MAX_MODEL_LEN  |  kv_cache: ${KV_CACHE_DTYPE:-default}"
@@ -112,4 +116,5 @@ vllm serve "$MODEL_NAME" \
   --tool-call-parser "$TOOL_CALL_PARSER" \
   "${QUANT_ARGS[@]}" \
   "${BATCH_ARGS[@]}" \
-  "${KV_CACHE_ARGS[@]}"
+  "${KV_CACHE_ARGS[@]}" \
+  "${MM_ARGS[@]}"

@@ -97,6 +97,12 @@ export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
 QUANT_ARGS=(); [ -n "$QUANTIZATION" ] && QUANT_ARGS=(--quantization "$QUANTIZATION")
 BATCH_ARGS=(); [ -n "$MAX_NUM_BATCHED_TOKENS" ] && BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
 KV_CACHE_ARGS=(); [ -n "$KV_CACHE_DTYPE" ] && KV_CACHE_ARGS=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+# Qwen3.6/Gemma4 are vision-language models, but SWE-Bench is text-only. Capping
+# images at 0 makes vLLM skip the multimodal encoder warmup — a step that HUNG
+# for 28 min on Tillicum during "profiled with 1 image items" and never reached
+# startup. Also frees the encoder-cache memory. Override LIMIT_MM="" to re-enable.
+if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0}'; fi
+MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
 
 SERVER_LOG="logs/vllm_serve_inline_${SLURM_JOB_ID:-local}.log"
 echo ">>> [server] Starting $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
@@ -109,7 +115,7 @@ echo ">>> [server] gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model
     --max-model-len "$MAX_MODEL_LEN" \
     --dtype auto --trust-remote-code --enforce-eager \
     --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER" \
-    "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}"
+    "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}" "${MM_ARGS[@]}"
 ) > "$SERVER_LOG" 2>&1 &
 VLLM_PID=$!
 
