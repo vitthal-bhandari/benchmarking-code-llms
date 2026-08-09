@@ -51,6 +51,15 @@ TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
 QUANTIZATION="${QUANTIZATION:-}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
+# vLLM's default MoE backend selection (FlashInfer CUTLASS, for unquantized/BF16
+# MoE on Hopper) segfaults at the native level on Tillicum during the profiling
+# forward pass ("Segfault encountered", tensorrt_llm cutlass_kernels frames).
+# Force Triton instead — confirmed clean startup (weights load -> KV cache sizing
+# -> Application startup complete, no crash). Verified via `vllm serve
+# --help=moe-backend`; valid values: auto,triton,cutlass,deep_gemm,flashinfer_*,
+# marlin,humming,aiter,emulation,triton_unfused. Only relevant for unquantized
+# (BF16) MoE checkpoints — harmless to leave set for a quantized one too.
+MOE_BACKEND="${MOE_BACKEND:-triton}"
 
 # --- agent/driver config ------------------------------------------------------
 # litellm model id used by mini-swe-agent; must match how MODEL_NAME above is
@@ -78,7 +87,10 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export VLLM_CACHE_ROOT="/gpfs/scrubbed/$USER/.cache/vllm"
 mkdir -p "$VLLM_CACHE_ROOT" "$HF_HUB_CACHE" "$TORCH_HOME"
 
-module load gcc/11.5.0 2>/dev/null || echo ">>> WARNING: module load gcc/11.5.0 failed — JIT kernels may fail"
+# No-op in practice on Tillicum (system g++ is already 11.5.0); kept as a
+# harmless safety net. See MOE_BACKEND / LIMIT_MM below for the actual fixes
+# to the startup crashes hit during initial setup.
+module load gcc/11.5.0 2>/dev/null || true
 
 export CUDA_HOME="$PROJECT_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
 export PATH="$CUDA_HOME/bin:$PATH"
@@ -97,10 +109,20 @@ export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
 QUANT_ARGS=(); [ -n "$QUANTIZATION" ] && QUANT_ARGS=(--quantization "$QUANTIZATION")
 BATCH_ARGS=(); [ -n "$MAX_NUM_BATCHED_TOKENS" ] && BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
 KV_CACHE_ARGS=(); [ -n "$KV_CACHE_DTYPE" ] && KV_CACHE_ARGS=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+# Qwen3.6/Gemma4 are vision-language models, but SWE-Bench is text-only. The
+# multimodal encoder warmup broke startup twice on Tillicum: with no limit it
+# HUNG 28 min on "profiled with 1 image items"; with only image capped it moved
+# on to "profiled with 1 video items" and the EngineCore worker crashed at the
+# native level. Cap EVERY modality the model supports so the warmup is skipped
+# entirely (also frees the encoder-cache memory). Override LIMIT_MM="" to
+# re-enable, or edit the JSON if a model exposes other modalities.
+if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0}'; fi
+MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
+MOE_ARGS=(); [ -n "$MOE_BACKEND" ] && MOE_ARGS=(--kernel-config.moe_backend "$MOE_BACKEND")
 
 SERVER_LOG="logs/vllm_serve_inline_${SLURM_JOB_ID:-local}.log"
 echo ">>> [server] Starting $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
-echo ">>> [server] gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: $MAX_MODEL_LEN  |  kv_cache: ${KV_CACHE_DTYPE:-default}"
+echo ">>> [server] gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: $MAX_MODEL_LEN  |  kv_cache: ${KV_CACHE_DTYPE:-default}  |  moe_backend: ${MOE_BACKEND:-auto}"
 
 (
   source .venv/bin/activate
@@ -109,7 +131,7 @@ echo ">>> [server] gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model
     --max-model-len "$MAX_MODEL_LEN" \
     --dtype auto --trust-remote-code --enforce-eager \
     --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER" \
-    "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}"
+    "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}" "${MM_ARGS[@]}" "${MOE_ARGS[@]}"
 ) > "$SERVER_LOG" 2>&1 &
 VLLM_PID=$!
 

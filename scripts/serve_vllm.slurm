@@ -53,6 +53,10 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 # "fp8" stores the KV cache in FP8 (~half the bytes/token) — a memory trick for
 # small GPUs. Not needed on H200; leave empty for full-precision KV cache.
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
+# vLLM's auto MoE backend (FlashInfer CUTLASS, for unquantized/BF16 MoE on
+# Hopper) segfaults at the native level on Tillicum during startup profiling.
+# Force Triton — confirmed clean startup. Verify choices: vllm serve --help=moe-backend
+MOE_BACKEND="${MOE_BACKEND:-triton}"
 
 PROJECT_DIR="/gpfs/projects/stf/$USER/benchmarking-code-llms"
 mkdir -p "$PROJECT_DIR/logs"
@@ -67,11 +71,11 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export VLLM_CACHE_ROOT="/gpfs/scrubbed/$USER/.cache/vllm"
 mkdir -p "$VLLM_CACHE_ROOT" "$HF_HUB_CACHE" "$TORCH_HOME"
 
-# Modern host compiler for FlashInfer/DeepGEMM runtime JIT (node default g++ is
-# too old for C++20 + CCCL). module load also puts its libstdc++ on
-# LD_LIBRARY_PATH so the compiled .so loads. If module isn't available in batch,
-# the warning fires and JIT kernels may fail — load it interactively and retry.
-module load gcc/11.5.0 2>/dev/null || echo ">>> WARNING: module load gcc/11.5.0 failed — JIT kernels may fail"
+# On Tillicum this is a no-op in practice (system /usr/bin/g++ IS already
+# 11.5.0 / Red Hat build) — kept as a harmless safety net in case that ever
+# changes. It was NOT the fix for the startup crashes hit during initial setup;
+# see MOE_BACKEND and LIMIT_MM below for the actual root causes found.
+module load gcc/11.5.0 2>/dev/null || true
 
 # Self-contained pip CUDA toolkit lives in the venv (nvcc, headers, libs).
 export CUDA_HOME="$PROJECT_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
@@ -98,9 +102,15 @@ source .venv/bin/activate
 QUANT_ARGS=(); [ -n "$QUANTIZATION" ] && QUANT_ARGS=(--quantization "$QUANTIZATION")
 BATCH_ARGS=(); [ -n "$MAX_NUM_BATCHED_TOKENS" ] && BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
 KV_CACHE_ARGS=(); [ -n "$KV_CACHE_DTYPE" ] && KV_CACHE_ARGS=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+# Text-only workload on a vision-language model: cap every modality at 0 so vLLM
+# skips the multimodal encoder warmup (image profiling hung 28 min on Tillicum;
+# capping image alone just moved it to video, which crashed). Override LIMIT_MM="".
+if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0}'; fi
+MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
+MOE_ARGS=(); [ -n "$MOE_BACKEND" ] && MOE_ARGS=(--kernel-config.moe_backend "$MOE_BACKEND")
 
 echo ">>> Serving $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
-echo ">>> gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: $MAX_MODEL_LEN  |  kv_cache: ${KV_CACHE_DTYPE:-default}"
+echo ">>> gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: $MAX_MODEL_LEN  |  kv_cache: ${KV_CACHE_DTYPE:-default}  |  moe_backend: ${MOE_BACKEND:-auto}"
 vllm serve "$MODEL_NAME" \
   --host 0.0.0.0 \
   --port "$PORT" \
@@ -112,4 +122,6 @@ vllm serve "$MODEL_NAME" \
   --tool-call-parser "$TOOL_CALL_PARSER" \
   "${QUANT_ARGS[@]}" \
   "${BATCH_ARGS[@]}" \
-  "${KV_CACHE_ARGS[@]}"
+  "${KV_CACHE_ARGS[@]}" \
+  "${MM_ARGS[@]}" \
+  "${MOE_ARGS[@]}"
