@@ -48,7 +48,10 @@ cd "$PROJECT_DIR"
 MODEL_NAME="${MODEL_NAME:-hosted_vllm/Qwen/Qwen3.6-35B-A3B}"
 SLICE="${SLICE:-0:20}"
 WORKERS="${WORKERS:-4}"
-OUTPUT_DIR="${OUTPUT_DIR:-runs/run_$(date +%Y%m%d_%H%M%S)}"
+# Job id appended so repeated runs get distinct dirs (mini-swe-agent resumes an
+# existing OUTPUT_DIR rather than starting fresh).
+OUTPUT_DIR="${OUTPUT_DIR:-runs/run}"
+OUTPUT_DIR="${OUTPUT_DIR}_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 API_OVERRIDE="${API_OVERRIDE:-configs/api_override.yaml}"
 
 # Keep the SWE-Bench dataset cache off the 10GB home quota.

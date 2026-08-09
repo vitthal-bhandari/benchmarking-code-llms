@@ -73,11 +73,14 @@ calls would double cost for nothing):
 ```bash
 sbatch --export=SLICE="0:20",WORKERS=4,OUTPUT_DIR=runs/run_qwen_20 \
   scripts/serve_and_run_swebench.slurm
+# actual dir gets the job id appended: runs/run_qwen_20_<jobid>/ (so repeated
+# runs stay distinct). The job log prints the resolved path; or: ls -dt runs/*
 
 # Score once it finishes (needs SWEBENCH_API_KEY; sb-cli is in agent-venv).
 source agent-venv/bin/activate
+RUN=run_qwen_20_<jobid>
 sb-cli submit swe-bench_verified test \
-  --predictions_path runs/run_qwen_20/preds.json --run_id run_qwen_20
+  --predictions_path runs/$RUN/preds.json --run_id $RUN
 ```
 
 Run a second model (e.g. Gemma4) as its own job — it gets its own GPU and runs

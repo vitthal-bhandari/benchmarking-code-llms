@@ -58,7 +58,12 @@ KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
 AGENT_MODEL_NAME="${AGENT_MODEL_NAME:-hosted_vllm/$MODEL_NAME}"
 SLICE="${SLICE:-0:20}"
 WORKERS="${WORKERS:-4}"
-OUTPUT_DIR="${OUTPUT_DIR:-runs/run_$(date +%Y%m%d_%H%M%S)}"
+# Auto-append the job id so repeated runs of the same config get distinct dirs
+# (mini-swe-agent RESUMES an existing OUTPUT_DIR — skipping instances already
+# present — so without a unique suffix two runs would silently merge). The
+# suffix also ties the run dir directly to its logs/swebench_run_<jobid>.* .
+OUTPUT_DIR="${OUTPUT_DIR:-runs/run}"
+OUTPUT_DIR="${OUTPUT_DIR}_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-1800}"   # 30 min — full-weights loads varied 100-1100s on Klone under FS contention
 
 PROJECT_DIR="/gpfs/projects/stf/$USER/benchmarking-code-llms"
