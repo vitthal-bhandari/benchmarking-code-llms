@@ -22,8 +22,8 @@
 # For 1 GPU: max 8 CPUs, max 200GB RAM. Request more GPUs to get more of either.
 #
 # Usage:
-#   sbatch scripts/serve_vllm.slurm                                  # Qwen3.6 default
-#   sbatch --export=MAX_MODEL_LEN=262144 scripts/serve_vllm.slurm    # native context (H200 has room)
+#   sbatch scripts/serve_vllm.slurm                                  # native context (default)
+#   sbatch --export=MAX_MODEL_LEN=65536 scripts/serve_vllm.slurm     # cap it explicitly if desired
 #
 # Find the endpoint after it starts:
 #   squeue --me                                   # get the node
@@ -37,9 +37,11 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.6-35B-A3B}"
 PORT="${PORT:-8000}"
-# Default 65536 is safe on any GPU. On H200 (141GB) you can go to the model's
-# native max (e.g. 262144 for Qwen3.6) with plenty of KV-cache headroom.
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
+# Empty = omit --max-model-len entirely, so vLLM reads the model's own native
+# max from its config (generalizes across models with different native limits).
+# Safe as the default on Tillicum/H200 (141GB) — the old 65536 default existed
+# only to fit Klone's memory-constrained 48GB L40S. Set explicitly to cap it.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 # Tool-call parser must match how the model emits calls in raw text. Qwen3.6
 # uses <tool_call><function=NAME><parameter=KEY>...  -> qwen3_coder. Gemma4 ->
 # gemma4. Verify choices with: vllm serve --help=tool-call-parser
@@ -108,18 +110,19 @@ KV_CACHE_ARGS=(); [ -n "$KV_CACHE_DTYPE" ] && KV_CACHE_ARGS=(--kv-cache-dtype "$
 if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0}'; fi
 MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
 MOE_ARGS=(); [ -n "$MOE_BACKEND" ] && MOE_ARGS=(--kernel-config.moe_backend "$MOE_BACKEND")
+MAX_LEN_ARGS=(); [ -n "$MAX_MODEL_LEN" ] && MAX_LEN_ARGS=(--max-model-len "$MAX_MODEL_LEN")
 
 echo ">>> Serving $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
-echo ">>> gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: $MAX_MODEL_LEN  |  kv_cache: ${KV_CACHE_DTYPE:-default}  |  moe_backend: ${MOE_BACKEND:-auto}"
+echo ">>> gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: ${MAX_MODEL_LEN:-native/model default}  |  kv_cache: ${KV_CACHE_DTYPE:-default}  |  moe_backend: ${MOE_BACKEND:-auto}"
 vllm serve "$MODEL_NAME" \
   --host 0.0.0.0 \
   --port "$PORT" \
-  --max-model-len "$MAX_MODEL_LEN" \
   --dtype auto \
   --trust-remote-code \
   --enforce-eager \
   --enable-auto-tool-choice \
   --tool-call-parser "$TOOL_CALL_PARSER" \
+  "${MAX_LEN_ARGS[@]}" \
   "${QUANT_ARGS[@]}" \
   "${BATCH_ARGS[@]}" \
   "${KV_CACHE_ARGS[@]}" \
