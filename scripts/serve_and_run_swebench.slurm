@@ -97,11 +97,14 @@ export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
 QUANT_ARGS=(); [ -n "$QUANTIZATION" ] && QUANT_ARGS=(--quantization "$QUANTIZATION")
 BATCH_ARGS=(); [ -n "$MAX_NUM_BATCHED_TOKENS" ] && BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
 KV_CACHE_ARGS=(); [ -n "$KV_CACHE_DTYPE" ] && KV_CACHE_ARGS=(--kv-cache-dtype "$KV_CACHE_DTYPE")
-# Qwen3.6/Gemma4 are vision-language models, but SWE-Bench is text-only. Capping
-# images at 0 makes vLLM skip the multimodal encoder warmup — a step that HUNG
-# for 28 min on Tillicum during "profiled with 1 image items" and never reached
-# startup. Also frees the encoder-cache memory. Override LIMIT_MM="" to re-enable.
-if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0}'; fi
+# Qwen3.6/Gemma4 are vision-language models, but SWE-Bench is text-only. The
+# multimodal encoder warmup broke startup twice on Tillicum: with no limit it
+# HUNG 28 min on "profiled with 1 image items"; with only image capped it moved
+# on to "profiled with 1 video items" and the EngineCore worker crashed at the
+# native level. Cap EVERY modality the model supports so the warmup is skipped
+# entirely (also frees the encoder-cache memory). Override LIMIT_MM="" to
+# re-enable, or edit the JSON if a model exposes other modalities.
+if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0}'; fi
 MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
 
 SERVER_LOG="logs/vllm_serve_inline_${SLURM_JOB_ID:-local}.log"
