@@ -46,7 +46,13 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 # --- server config -----------------------------------------------------------
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.6-35B-A3B}"
 PORT="${PORT:-8000}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
+# Empty = omit --max-model-len entirely, so vLLM reads the model's own native
+# max from its config (generalizes across models with different native limits,
+# unlike hardcoding one number). Safe as the default specifically because we're
+# on Tillicum/H200 (141GB) — the old 65536 default existed only to fit Klone's
+# memory-constrained 48GB L40S and is no longer a relevant constraint here. Set
+# explicitly (e.g. MAX_MODEL_LEN=65536) only if you deliberately want to cap it.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
 QUANTIZATION="${QUANTIZATION:-}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
@@ -119,19 +125,19 @@ KV_CACHE_ARGS=(); [ -n "$KV_CACHE_DTYPE" ] && KV_CACHE_ARGS=(--kv-cache-dtype "$
 if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0}'; fi
 MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
 MOE_ARGS=(); [ -n "$MOE_BACKEND" ] && MOE_ARGS=(--kernel-config.moe_backend "$MOE_BACKEND")
+MAX_LEN_ARGS=(); [ -n "$MAX_MODEL_LEN" ] && MAX_LEN_ARGS=(--max-model-len "$MAX_MODEL_LEN")
 
 SERVER_LOG="logs/vllm_serve_inline_${SLURM_JOB_ID:-local}.log"
 echo ">>> [server] Starting $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
-echo ">>> [server] gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: $MAX_MODEL_LEN  |  kv_cache: ${KV_CACHE_DTYPE:-default}  |  moe_backend: ${MOE_BACKEND:-auto}"
+echo ">>> [server] gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: ${MAX_MODEL_LEN:-native/model default}  |  kv_cache: ${KV_CACHE_DTYPE:-default}  |  moe_backend: ${MOE_BACKEND:-auto}"
 
 (
   source .venv/bin/activate
   exec vllm serve "$MODEL_NAME" \
     --host 0.0.0.0 --port "$PORT" \
-    --max-model-len "$MAX_MODEL_LEN" \
     --dtype auto --trust-remote-code --enforce-eager \
     --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER" \
-    "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}" "${MM_ARGS[@]}" "${MOE_ARGS[@]}"
+    "${MAX_LEN_ARGS[@]}" "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}" "${MM_ARGS[@]}" "${MOE_ARGS[@]}"
 ) > "$SERVER_LOG" 2>&1 &
 VLLM_PID=$!
 
