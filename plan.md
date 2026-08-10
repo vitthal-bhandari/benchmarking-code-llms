@@ -468,3 +468,30 @@ users hit this software wall.
   `AssocGrpGRES` as soon as two were cancelled.
 - `--partition=compute` has no GPUs at all — `--gpus=...` there fails
   instantly with "Requested node configuration is not available".
+
+---
+
+## MVP2 status — Tillicum, wider run (Aug 9 2026)
+
+Migration to Tillicum (on-demand H200, no preemption) complete and validated
+end-to-end: full-weights `Qwen/Qwen3.6-35B-A3B` (BF16, native context) serves
+and drives SWE-Bench Verified in one combined GPU job
+(`scripts/serve_and_run_swebench.slurm`). First scored run
+(`run_qwen_20_216375`) = 0/20 (0/12 on fair shots) — see report.md.
+
+**Next: wider run to test whether 0 is astropy-specific or general.** Design:
+- **Native context** (default now — omit `MAX_MODEL_LEN`), so no more
+  `ContextWindowExceededError` truncations.
+- **Larger, multi-repo slice** — slice `0:20` is all astropy; `0:100` spans
+  astropy + django, a real diversity step.
+- **Workers + horizontal split for speed** — `WORKERS=8` per job (matches
+  Tillicum's 8-CPU-per-GPU cap; agent workers are container/test-execution
+  bound, so ~1 CPU/worker), and split the range across N parallel single-GPU
+  jobs (on-demand access makes this free of queueing). ~4x wall-clock speedup
+  per 4-way split, at ~1.6x GPU-hour cost — merge the per-job `preds.json`
+  before scoring.
+
+Open follow-ups: the `14508` "No patch.txt found" patch-prefix corruption
+(mini-swe-agent submission handling) and the `14369` malformed-diff case —
+both silently convert good work into scoring failures; worth fixing before
+large runs so the resolve rate isn't artificially depressed.
