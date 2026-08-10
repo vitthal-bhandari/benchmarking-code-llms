@@ -1,0 +1,102 @@
+{
+  "astropy__astropy-12907": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-12907",
+    "model_patch": "diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py\nindex a308e2729..45bea3608 100644\n--- a/astropy/modeling/separable.py\n+++ b/astropy/modeling/separable.py\n@@ -242,7 +242,7 @@ def _cstack(left, right):\n         cright = _coord_matrix(right, 'right', noutp)\n     else:\n         cright = np.zeros((noutp, right.shape[1]))\n-        cright[-right.shape[0]:, -right.shape[1]:] = 1\n+        cright[-right.shape[0]:, -right.shape[1]:] = right\n \n     return np.hstack([cleft, cright])\n \n"
+  },
+  "astropy__astropy-13236": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-13236",
+    "model_patch": "diff --git a/astropy/table/table.py b/astropy/table/table.py\nindex 5afe2127a..377295481 100644\n--- a/astropy/table/table.py\n+++ b/astropy/table/table.py\n@@ -1240,11 +1240,16 @@ class Table:\n                                 'did not return a valid mixin column')\n \n         # Structured ndarray gets viewed as a mixin unless already a valid\n-        # mixin class\n+        # mixin class.  In the future this will be a Column.\n         if (not isinstance(data, Column) and not data_is_mixin\n                 and isinstance(data, np.ndarray) and len(data.dtype) > 1):\n-            data = data.view(NdarrayMixin)\n-            data_is_mixin = True\n+            warnings.warn(\n+                \"Adding a structured array as a column is deprecated. \"\n+                \"In the future, structured arrays will be added as a Column \"\n+                \"instead of NdarrayMixin. To silence this warning, wrap the \"\n+                \"structured array in Column explicitly.\",\n+                FutureWarning,\n+                stacklevel=2)\n \n         # Get the final column name using precedence.  Some objects may not\n         # have an info attribute. Also avoid creating info as a side effect.\n"
+  },
+  "astropy__astropy-13453": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-13453",
+    "model_patch": "diff --git a/astropy/io/ascii/html.py b/astropy/io/ascii/html.py\nindex 266cf229c..bc2d816b0 100644\n--- a/astropy/io/ascii/html.py\n+++ b/astropy/io/ascii/html.py\n@@ -348,12 +348,14 @@ class HTML(core.BaseReader):\n \n         cols = list(table.columns.values())\n \n+        self.data.cols = cols\n         self.data.header.cols = cols\n \n         if isinstance(self.data.fill_values, tuple):\n             self.data.fill_values = [self.data.fill_values]\n \n         self.data._set_fill_values(cols)\n+        self.data._set_col_formats()\n \n         lines = []\n \n@@ -429,6 +431,8 @@ class HTML(core.BaseReader):\n                                 for i in range(span):\n                                     # Split up multicolumns into separate columns\n                                     new_col = Column([el[i] for el in col])\n+                                    # Copy the format from the original column\n+                                    new_col.info.format = col.info.format\n \n                                     new_col_iter_str_vals = self.fill_values(\n                                         col, new_col.info.iter_str_vals())\n"
+  },
+  "astropy__astropy-13398": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-13398",
+    "model_patch": ""
+  },
+  "astropy__astropy-13033": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-13033",
+    "model_patch": ""
+  },
+  "astropy__astropy-13977": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-13977",
+    "model_patch": "diff --git a/astropy/units/quantity.py b/astropy/units/quantity.py\nindex b98abfafb..c85a1208d 100644\n--- a/astropy/units/quantity.py\n+++ b/astropy/units/quantity.py\n@@ -667,7 +667,15 @@ class Quantity(np.ndarray):\n         arrays = []\n         for input_, converter in zip(inputs, converters):\n             input_ = getattr(input_, \"value\", input_)\n-            arrays.append(converter(input_) if converter else input_)\n+            if converter is not None:\n+                try:\n+                    arrays.append(converter(input_))\n+                except ValueError:\n+                    # If conversion fails, return NotImplemented to allow\n+                    # the reflected operation to be tried.\n+                    return NotImplemented\n+            else:\n+                arrays.append(input_)\n \n         # Call our superclass's __array_ufunc__\n         result = super().__array_ufunc__(function, method, *arrays, **kwargs)\n"
+  },
+  "astropy__astropy-14309": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14309",
+    "model_patch": "diff --git a/astropy/io/fits/connect.py b/astropy/io/fits/connect.py\nindex 4b6150f4a..1f51fe483 100644\n--- a/astropy/io/fits/connect.py\n+++ b/astropy/io/fits/connect.py\n@@ -69,7 +69,7 @@ def is_fits(origin, filepath, fileobj, *args, **kwargs):\n             (\".fits\", \".fits.gz\", \".fit\", \".fit.gz\", \".fts\", \".fts.gz\")\n         ):\n             return True\n-    return isinstance(args[0], (HDUList, TableHDU, BinTableHDU, GroupsHDU))\n+    return len(args) > 0 and isinstance(args[0], (HDUList, TableHDU, BinTableHDU, GroupsHDU))\n \n \n def _decode_mixins(tbl):\n"
+  },
+  "astropy__astropy-14365": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14365",
+    "model_patch": "diff --git a/astropy/io/ascii/qdp.py b/astropy/io/ascii/qdp.py\nindex 83a4f004a..5324dc81c 100644\n--- a/astropy/io/ascii/qdp.py\n+++ b/astropy/io/ascii/qdp.py\n@@ -68,7 +68,7 @@ def _line_type(line, delimiter=None):\n     _new_re = rf\"NO({sep}NO)+\"\n     _data_re = rf\"({_decimal_re}|NO|[-+]?nan)({sep}({_decimal_re}|NO|[-+]?nan))*)\"\n     _type_re = rf\"^\\s*((?P<command>{_command_re})|(?P<new>{_new_re})|(?P<data>{_data_re})?\\s*(\\!(?P<comment>.*))?\\s*$\"\n-    _line_type_re = re.compile(_type_re)\n+    _line_type_re = re.compile(_type_re, re.IGNORECASE)\n     line = line.strip()\n     if not line:\n         return \"comment\"\n@@ -306,7 +306,7 @@ def _get_tables_from_qdp_file(qdp_file, input_colnames=None, delimiter=None):\n \n             values = []\n             for v in line.split(delimiter):\n-                if v == \"NO\":\n+                if v.upper() == \"NO\":\n                     values.append(np.ma.masked)\n                 else:\n                     # Understand if number is int or float\n"
+  },
+  "astropy__astropy-14182": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14182",
+    "model_patch": ""
+  },
+  "astropy__astropy-14369": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14369",
+    "model_patch": "\n        def p_product_of_units(p):\n            \"\"\"\n            product_of_units : unit_expression PRODUCT combined_units\n                             | unit_expression\n            \"\"\"\n            if len(p) == 4:\n                p[0] = p[1] * p[3]\n            else:\n                p[0] = p[1]\n\n        def p_division_of_units(p):\n            \"\"\"\n            division_of_units : DIVISION unit_expression\n                              | unit_expression DIVISION unit_expression\n                              | division_of_units DIVISION unit_expression\n            \"\"\"\n            if len(p) == 3:\n                p[0] = p[2] ** -1\n            else:\n                p[0] = p[1] / p[3]\n\n        def p_unit_expression(p):\n            \"\"\"\n            unit_expression : unit_with_power\n                            | OPEN_PAREN combined_units CLOSE_PAREN\n            \"\"\"\n            if len(p) == 2:\n                p[0] = p[1]\n            else:\n"
+  },
+  "astropy__astropy-13579": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-13579",
+    "model_patch": ""
+  },
+  "astropy__astropy-14096": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14096",
+    "model_patch": ""
+  },
+  "astropy__astropy-14539": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14539",
+    "model_patch": "diff --git a/astropy/io/fits/diff.py b/astropy/io/fits/diff.py\nindex 100cdf1b8..d3608ef01 100644\n--- a/astropy/io/fits/diff.py\n+++ b/astropy/io/fits/diff.py\n@@ -1449,7 +1449,7 @@ class TableDataDiff(_BaseDiff):\n                 arrb.dtype, np.floating\n             ):\n                 diffs = where_not_allclose(arra, arrb, rtol=self.rtol, atol=self.atol)\n-            elif \"P\" in col.format:\n+            elif \"P\" in col.format or \"Q\" in col.format:\n                 diffs = (\n                     [\n                         idx\n"
+  },
+  "astropy__astropy-14508": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14508",
+    "model_patch": "No patch.txt found, using git diff\ndiff --git a/astropy/io/fits/card.py b/astropy/io/fits/card.py\nindex 118bfced8..d16709fd8 100644\n--- a/astropy/io/fits/card.py\n+++ b/astropy/io/fits/card.py\n@@ -1299,6 +1299,16 @@ def _format_value(value):\n \n def _format_float(value):\n     \"\"\"Format a floating number to make sure it gets the decimal point.\"\"\"\n+    # First try using str(value) which gives a shorter representation\n+    value_str = str(value)\n+\n+    # If str(value) is 20 characters or less, use it (with decimal point if needed)\n+    if len(value_str) <= 20:\n+        if \".\" not in value_str and \"E\" not in value_str and \"e\" not in value_str:\n+            value_str += \".0\"\n+        return value_str\n+\n+    # Otherwise, fall back to the original behavior\n     value_str = f\"{value:.16G}\"\n     if \".\" not in value_str and \"E\" not in value_str:\n         value_str += \".0\"\n"
+  },
+  "astropy__astropy-14995": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14995",
+    "model_patch": "diff --git a/astropy/nddata/mixins/ndarithmetic.py b/astropy/nddata/mixins/ndarithmetic.py\nindex 4153dfccb..28c34ca32 100644\n--- a/astropy/nddata/mixins/ndarithmetic.py\n+++ b/astropy/nddata/mixins/ndarithmetic.py\n@@ -522,6 +522,9 @@ class NDArithmeticMixin:\n             return deepcopy(operand.mask)\n         elif operand is None:\n             return deepcopy(self.mask)\n+        elif operand.mask is None:\n+            # Make a copy so there is no reference in the result.\n+            return deepcopy(self.mask)\n         else:\n             # Now lets calculate the resulting mask (operation enforces copy)\n             return handle_mask(self.mask, operand.mask, **kwds)\n"
+  },
+  "astropy__astropy-7336": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-7336",
+    "model_patch": "diff --git a/astropy/units/decorators.py b/astropy/units/decorators.py\nindex 8bece5a85..502c20662 100644\n--- a/astropy/units/decorators.py\n+++ b/astropy/units/decorators.py\n@@ -220,7 +220,7 @@ class QuantityInput:\n             # Call the original function with any equivalencies in force.\n             with add_enabled_equivalencies(self.equivalencies):\n                 return_ = wrapped_function(*func_args, **func_kwargs)\n-            if wrapped_signature.return_annotation is not inspect.Signature.empty:\n+            if wrapped_signature.return_annotation is not inspect.Signature.empty and wrapped_signature.return_annotation is not None:\n                 return return_.to(wrapped_signature.return_annotation)\n             else:\n                 return return_\n"
+  },
+  "astropy__astropy-7166": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-7166",
+    "model_patch": "diff --git a/astropy/utils/misc.py b/astropy/utils/misc.py\nindex de3fb01d1..943371458 100644\n--- a/astropy/utils/misc.py\n+++ b/astropy/utils/misc.py\n@@ -528,13 +528,18 @@ class InheritDocstrings(type):\n                 not key.startswith('_'))\n \n         for key, val in dct.items():\n-            if (inspect.isfunction(val) and\n+            if ((inspect.isfunction(val) or isinstance(val, (property, staticmethod, classmethod))) and\n                 is_public_member(key) and\n                 val.__doc__ is None):\n                 for base in cls.__mro__[1:]:\n                     super_method = getattr(base, key, None)\n                     if super_method is not None:\n-                        val.__doc__ = super_method.__doc__\n+                        if isinstance(val, (staticmethod, classmethod)):\n+                            # For staticmethod and classmethod, set the docstring\n+                            # on the underlying function\n+                            val.__func__.__doc__ = super_method.__doc__\n+                        else:\n+                            val.__doc__ = super_method.__doc__\n                         break\n \n         super().__init__(name, bases, dct)\n"
+  },
+  "astropy__astropy-7606": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-7606",
+    "model_patch": "diff --git a/astropy/units/core.py b/astropy/units/core.py\nindex e9bd986d3..0ee8cf869 100644\n--- a/astropy/units/core.py\n+++ b/astropy/units/core.py\n@@ -1710,7 +1710,10 @@ class UnrecognizedUnit(IrreducibleUnit):\n         _unrecognized_operator\n \n     def __eq__(self, other):\n-        other = Unit(other, parse_strict='silent')\n+        try:\n+            other = Unit(other, parse_strict='silent')\n+        except (ValueError, UnitsError, TypeError):\n+            return False\n         return isinstance(other, UnrecognizedUnit) and self.name == other.name\n \n     def __ne__(self, other):\n"
+  },
+  "astropy__astropy-7671": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-7671",
+    "model_patch": "diff --git a/astropy/utils/introspection.py b/astropy/utils/introspection.py\nindex 3e784f9fc..97444ec6b 100644\n--- a/astropy/utils/introspection.py\n+++ b/astropy/utils/introspection.py\n@@ -6,7 +6,14 @@\n import inspect\n import types\n import importlib\n-from distutils.version import LooseVersion\n+\n+try:\n+    from packaging.version import parse as parse_version\n+except ImportError:\n+    try:\n+        from pkg_resources import parse_version\n+    except ImportError:\n+        from distutils.version import LooseVersion as parse_version\n \n \n __all__ = ['resolve_name', 'minversion', 'find_current_module',\n@@ -140,9 +147,9 @@ def minversion(module, version, inclusive=True, version_path='__version__'):\n         have_version = resolve_name(module.__name__, version_path)\n \n     if inclusive:\n-        return LooseVersion(have_version) >= LooseVersion(version)\n+        return parse_version(have_version) >= parse_version(version)\n     else:\n-        return LooseVersion(have_version) > LooseVersion(version)\n+        return parse_version(have_version) > parse_version(version)\n \n \n def find_current_module(depth=1, finddiff=False):\n"
+  },
+  "astropy__astropy-14598": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14598",
+    "model_patch": ""
+  }
+}
