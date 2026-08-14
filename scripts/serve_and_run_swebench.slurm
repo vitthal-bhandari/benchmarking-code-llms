@@ -12,7 +12,7 @@
 # =============================================================================
 # serve_and_run_swebench.slurm — Tillicum single-job pipeline: starts vLLM in
 # the background, waits for it to be ready, then drives mini-swe-agent against
-# it on localhost, in one GPU allocation. 
+# it on localhost, in one GPU allocation.
 #
 # WHY combined, not two separate jobs (serve_vllm.slurm + run_swebench_agent.slurm):
 # Tillicum requires --gres=gpu on every job — "CPU-only jobs are not allowed."
