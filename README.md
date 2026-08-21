@@ -12,18 +12,24 @@ attributable to memory rather than to harness sophistication.
 scripts/         Slurm + setup scripts (see below)
 configs/         registry.json (litellm cost map) + api_override templates
 results/         sb-cli-reports/ — scored eval summaries (resolve rates)
+local-eval-reports/  Trustworthy scores from the local Docker harness (see below)
 updates/         Advisor / standup write-ups
 plan.md          Adaptive plan + running decision log
 report.md        Findings log
 requirements-working.txt   pip freeze of the known-good vLLM 0.21.0 serving env
+requirements-eval.txt      pip freeze of the local Docker-eval venv (eval-venv)
 
 runs/            (gitignored) agent trajectories, preds.json, per-run outputs
 logs/            (tracked) Slurm job stdout/stderr — kept in git; Tillicum
                  scratch isn't a reliable single copy
+eval-venv/       (gitignored) local Python venv for the SWE-bench Docker harness
+local_eval/      (gitignored) harness working dir — build/run logs, per-instance
+                 test output; regenerate anytime from runs/*/preds.json
 ```
 
-Scored summaries (`results/`) are tracked; raw trajectories/preds under `runs/`
-are heavy and reproducible, so they stay local.
+Scored summaries (`results/`, `local-eval-reports/`) are tracked; raw
+trajectories/preds under `runs/` are heavy and reproducible, so they stay
+local.
 
 ## Cluster: Tillicum
 
@@ -97,14 +103,59 @@ sbatch --export=MODEL_NAME="google/gemma-4-26B-A4B-it",TOOL_CALL_PARSER=gemma4,\
 long-lived server you `curl`/iterate against) — that use case is worth its own
 GPU; full scored runs should go through `serve_and_run_swebench.slurm`.
 
+## Scoring (official swebench grading, NOT sb-cli)
+
+**Do not trust `sb-cli`'s hosted evaluator** — as of Aug 2026 it returns
+`completed_instances: 0` / `failed_instances: 100%` on every submission
+regardless of prediction quality (a known, unresolved outage —
+[swe-bench/sb-cli#27](https://github.com/swe-bench/sb-cli/issues/27), #28, #31;
+a maintainer confirmed they've stopped accepting submissions). Every
+`sb-cli-reports/*.json` result is uninformative, **not** a real 0%. Score with
+the official `swebench` grading code instead. Generation is unchanged (Tillicum
+GPUs); only scoring moves. There are two backends:
+
+**A) Klone + Apptainer (primary — no Docker, no GPU, real disk).** Klone allows
+CPU-only jobs and has Apptainer + `/gscratch/scrubbed`, so this is where full
+runs get scored. Each instance pulls its pre-built DockerHub eval image into a
+single `.sif`, applies the patch + runs the tests inside it (`--fakeroot` +
+per-instance writable overlay), grades with swebench's own `get_eval_report`,
+then **deletes the `.sif`** — peak disk stays ~one image, sidestepping the
+storage wall that Docker hits. Klone nodes are x86_64, so the images run
+natively (no emulation).
+
+```bash
+bash scripts/install_klone_eval_venv.sh    # one-time, on a Klone LOGIN node
+sbatch --export=PREDS=runs/<run>/preds.json,RUN_ID=<run_id> \
+  scripts/run_apptainer_eval.slurm          # CPU-only job (default: ckpt-all)
+# -> local-eval-reports/<run_id>.json (tracked). Resumable: rerun to continue
+#    after a checkpoint-partition preemption (per-instance reports are cached).
+```
+
+**B) Mac + Docker/Colima (fallback — only if you have real free disk).** Same
+official harness (`swebench eval`) against Docker on a laptop. Correct, but the
+full astropy+django image set (~100GB+ resident) overran a disk-capped Colima
+VM; use only for small single-repo subsets.
+
+```bash
+bash scripts/install_eval_venv.sh          # one-time: Colima + docker + eval-venv
+scripts/run_local_eval.sh runs/<run>/preds.json <run_id> [workers]
+```
+
+(The Mac path pre-pulls each image with `--platform linux/amd64` since Docker
+Hub has no arm64 manifest for these — not needed on Klone's x86_64 nodes.)
+
 ## Scripts
 
 | Script | Purpose |
 |---|---|
-| `install_venv.sh` | Build both venvs (`BUILD_DEEPGEMM=1` only if serving an FP8 checkpoint) |
-| `serve_and_run_swebench.slurm` | **Primary path**: one GPU job, serves + drives against localhost |
+| `install_venv.sh` | Build both Tillicum venvs (`BUILD_DEEPGEMM=1` only if serving an FP8 checkpoint) |
+| `serve_and_run_swebench.slurm` | **Primary generation path**: one GPU job, serves + drives against localhost |
 | `serve_vllm.slurm` | Standalone server, for interactive debugging only (see above) |
 | `run_swebench_agent.slurm` | Standalone driver — not directly submittable on Tillicum (0-GPU); kept for reference |
+| `install_klone_eval_venv.sh` | **Primary scoring setup**: one-time Klone venv (`swebench`) + dataset cache |
+| `run_apptainer_eval.slurm` / `run_apptainer_eval.py` | **Primary scoring**: score a run via Apptainer on Klone (CPU-only) |
+| `install_eval_venv.sh` | Fallback scoring setup: Colima + Docker + `eval-venv` on a Mac |
+| `run_local_eval.sh` | Fallback scoring: official Docker harness on a Mac (small subsets only) |
 
 Cluster-specific details (QoS, GPU ratio, CUDA/JIT toolchain) are documented
 inline in each script and in `plan.md`.

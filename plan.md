@@ -495,3 +495,105 @@ Open follow-ups: the `14508` "No patch.txt found" patch-prefix corruption
 (mini-swe-agent submission handling) and the `14369` malformed-diff case —
 both silently convert good work into scoring failures; worth fixing before
 large runs so the resolve rate isn't artificially depressed.
+
+---
+
+## MVP2 — sb-cli was broken; switched to local Docker scoring (Aug 20 2026)
+
+**All prior 0% resolve-rate numbers are retracted** — see `report.md`'s "Aug
+20 2026" correction. sb-cli's hosted evaluator has been returning
+`completed_instances: 0` on every submission since before we ever used it (a
+known, unresolved outage the maintainers have stopped fixing). Advisor
+feedback ("verify the harness isn't reading an empty/wrong prediction file
+before concluding the model is bad") prompted the re-check that found this.
+
+**New scoring path**: local `swebench` harness via Docker on the Mac
+(Colima, disk-capped, gitignored `eval-venv`/`local_eval`), generation
+unchanged (Tillicum GPUs). `scripts/install_eval_venv.sh` (one-time) +
+`scripts/run_local_eval.sh <preds.json> <run_id> [workers]`. Two format/
+platform gaps fixed along the way (see `report.md` for detail): predictions
+need an inline `instance_id` per entry for the official harness, and Docker
+Hub's SWE-bench images need `--platform linux/amd64` pre-pulled explicitly on
+Apple Silicon (no arm64 manifest, and swebench's own pull call is
+platform-less).
+
+**Status**: `run_qwen_20_216375` re-scored → **10/20 (50%)**, 10/13 (77%) on
+patches that actually ran. `run_qwen_100` and `run_qwen_temp1_b_222103`
+re-scoring in progress — do not cite their old sb-cli numbers.
+
+**Immediate next steps:**
+1. Finish re-scoring `run_qwen_100` (99 instances, astropy+django) and
+   `run_qwen_temp1_b_222103` (25 django, temp=1.0) via the local harness.
+2. Redo the trajectory-analysis narrative in `report.md` ("plausible but not
+   exact") against real resolved/unresolved labels, not eyeballed diffs —
+   the one concrete case cited there (`astropy-7166`) turned out to actually
+   resolve.
+3. Re-open the temp=0 vs temp=1.0 comparison once both are correctly scored —
+   the original motivation (temp=0 → greedy-decoding loops → step-limit
+   failures) is still untested against real numbers.
+4. Advisor's third item — try a 9B model — is next once the scoring pipeline
+   is trusted end-to-end; no point running a new comparison through a scorer
+   we just found broken.
+5. `local-eval-reports/` is the new source of truth going forward; keep
+   `sb-cli-reports/` around for the record but don't score anything new
+   through sb-cli until swe-bench/sb-cli#27 is actually fixed upstream.
+
+**Local Docker scoring on this Mac is paused (disk), not abandoned.** The
+read-only eval images alone for astropy+django (`run_qwen_100`) filled the
+entire 28GB Colima VM cap; the writable per-container overlay each running
+instance additionally needs then had zero room, so all 46 already-cached
+instances failed to even start ("no space left on device"). Growing the VM
+disk further would have pushed the Mac's free space into single digits, so we
+tore the VM down and restored baseline (~41GB free) instead of pushing
+through. `run_qwen_20_216375` (all-astropy, smaller image footprint) is the
+one run that fit and is now correctly scored (10/20).
+
+## MVP2 — Apptainer scoring on Klone (primary path, Aug 20 2026)
+
+**Decision: move scoring to Klone + Apptainer**, not a cloud VM. Reasoning: the
+Mac/Docker disk wall is fundamental (SWE-bench's own guide asks for ~120GB
+resident images; Docker Desktop's guide confirms disk, not RAM, is the
+constraint). Klone has Apptainer (no Docker daemon needed), allows CPU-only
+jobs (Tillicum does not), has huge `/gscratch/scrubbed`, and its nodes are
+x86_64 so the `sweb.eval.x86_64.*` images run natively (no QEMU, no
+`--platform` hack the Mac's M3 needed).
+
+**Key architectural point that makes it fit**: `apptainer pull docker://…`
+flattens all layers into one standalone SIF — it LOSES Docker's cross-instance
+layer sharing, so keeping all 124 `.sif`s resident would be *worse* than Docker
+(~250GB). Therefore **pull-and-delete per instance is load-bearing**, not a
+nicety: peak disk = 1 `.sif` (~2GB) + a per-instance writable overlay. Writes
+go through `--fakeroot` (images run as root; `git apply` must modify root-owned
+`/testbed` files) + a per-instance ext3 `--overlay` (disk-backed, sparse,
+deleted after; `--writable-tmpfs` is a selectable fallback but its size is
+apptainer.conf-capped and may be too small).
+
+**We do NOT reimplement grading** — the runner imports and calls
+`swebench.harness.utils.make_test_spec` + `swebench.harness.grading.get_eval_report`
+directly, so resolved/unresolved is SWE-bench's own code. Only the container
+backend (Docker→Apptainer) is swapped.
+
+New files: `scripts/run_apptainer_eval.py` (orchestrator),
+`scripts/run_apptainer_eval.slurm` (CPU-only Klone job, defaults to `ckpt-all`
+— 1024 idle CPUs, and the runner is resumable so preemption just means
+resubmit), `scripts/install_klone_eval_venv.sh` (one-time login-node setup:
+`swebench` venv + pre-cache the Verified dataset).
+
+**Run order (user pulls code on Klone, then):**
+```bash
+# one-time, on a Klone LOGIN node:
+bash scripts/install_klone_eval_venv.sh
+
+# 1) validate on the 20-subset first (astropy; already 10/20 via Mac/Docker —
+#    this cross-checks the Apptainer path against a known-good number):
+sbatch --export=PREDS=runs/run_qwen_20_216375/preds.json,RUN_ID=run_qwen_20_216375 \
+  scripts/run_apptainer_eval.slurm
+
+# 2) then the 100-subset (astropy+django) — the run Docker couldn't fit:
+sbatch --export=PREDS=runs/run_qwen_100_merged.json,RUN_ID=run_qwen_100 \
+  scripts/run_apptainer_eval.slurm
+```
+First-instance validation gate: confirm `--fakeroot` + `--overlay` actually
+apply the patch and run tests on Klone's apptainer (the one unknown). If
+`run_qwen_20_216375` reproduces ~10/20, the path is trusted; scale to 100, then
+`run_qwen_temp1_b_222103` (temp=1.0) and the 9B model.
