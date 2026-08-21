@@ -86,6 +86,85 @@ minimal harness is expected and, for the research design, a clean baseline.
 distinguish "patch didn't apply" from "tests ran and failed". Patch
 applicability has to be inferred from the local `preds.json` instead.
 
+### CORRECTION — every 0% result above was a broken scorer, not the model (Aug 20 2026)
+
+**Retracted: "This is now a genuine capability result, not an artifact"** (the
+line above, re: `run_qwen_20_216375`). It was wrong. Advisor review (skepticism
+about empty-prediction-file / scoring-path bugs) prompted a re-check of the raw
+`sb-cli` report JSON, not just the headline resolved count, across all three
+runs scored to date (`run_qwen_20_216375`, `run_qwen_100`, `run_qwen_temp1_b_222103`):
+
+```
+completed_instances: 0
+failed_instances:    <submitted_instances>   (100%, every run)
+resolved_instances:  0
+unresolved_instances: 0
+```
+
+`completed_instances: 0` is the tell: in sb-cli's schema `failed` ≠
+`unresolved` — `unresolved` means the harness ran the tests and the patch
+didn't fix the bug (a real signal); `failed` means the evaluation job itself
+never completed. **100% of our submissions across three independent runs
+never finished evaluating at all**, including 77 well-formed clean patches
+from `run_qwen_100`.
+
+This turned out to be a known, currently-open, unresolved outage in sb-cli's
+hosted evaluator: [swe-bench/sb-cli#27](https://github.com/swe-bench/sb-cli/issues/27),
+[#28](https://github.com/swe-bench/sb-cli/issues/28),
+[#31](https://github.com/swe-bench/sb-cli/issues/31) — multiple independent
+users report identical `completed_instances: 0` on both SWE-bench Lite and
+Verified since May 2026, with the *same* predictions files scoring correctly
+against the official local harness. A SWE-bench maintainer confirmed on #27
+(2026-06-23): *"we don't accept submissions anymore to any of our
+leaderboards, not via the experiments repo and not via sb-cli... not sure
+when/if we'll get to this issue."* Our first submission was Aug 9 — over a
+month after the service was already dead.
+
+**Fix: switched scoring to the official local `swebench` harness, run via
+Docker on a Mac (Colima), CPU-only** — see the new "Scoring (local Docker
+harness)" section of `README.md` and `scripts/install_eval_venv.sh` /
+`scripts/run_local_eval.sh`. Two Apple-Silicon-specific gaps found and fixed
+along the way: (1) the harness's dict-format predictions loader requires each
+entry to carry its own `instance_id` key, which sb-cli's more lenient parser
+didn't need (`scripts/prepare_harness_preds.py` converts); (2) SWE-bench's
+Docker Hub images are x86_64-only with no arm64 manifest, so swebench's own
+(platform-less) `docker pull` call 404s on Apple Silicon — fixed by
+pre-pulling each image with `--platform linux/amd64` first
+(`scripts/prefetch_harness_images.py`), so the harness's own `images.get()`
+finds it locally and never calls its broken pull path.
+
+**Re-scored `run_qwen_20_216375` (the only run re-scored so far): 10/20
+resolved (50%), not 0/20.** Against the "ran at all" denominator (13 patches
+that were well-formed enough to apply and execute — 6 were empty from the
+pre-native-context `65536` cap, 1 was the malformed `14369` diff) that's
+**10/13 (77%)**. `astropy__astropy-7166` — the instance previously singled out
+in the "plausible but not exact" narrative below, based on reading the diff by
+eye — is confirmed **resolved**, not almost-right. The prefix-corruption bug
+(`14508`, `"No patch.txt found, using git diff\n"` leaking into the patch
+body) also needs a correction: it *did* apply under the real harness (ended up
+`unresolved`, not `error`) — so it cost us nothing in this run, though it's
+still worth fixing since it's fragile by luck, not by design.
+
+The rest of the "plausible but not exact" mechanism description below, and the
+`run_qwen_100`/temp=1.0 comparison numbers, are pending re-score with the same
+local harness — do not cite the old 0% figures for those until updated here.
+
+**Local Docker scoring paused (disk) — `run_qwen_20_216375` is the only run
+re-scored so far.** SWE-bench's per-instance eval images are large (~4GB
+shared base per repo, but *read-only image layers alone* for the full
+astropy+django `run_qwen_100` set consumed the entire 28GB Colima VM disk cap
+— before even accounting for the writable container overlay each running
+instance additionally needs, which is what actually failed first: 46
+already-cached instances all errored with "no space left on device" trying to
+*start*, 0 completed). Growing the VM disk further would have cut the Mac's
+free space toward single-digit GB, so we stopped and tore the VM down instead
+(host disk fully restored to baseline, ~41GB free). `eval-venv/` and the
+`scripts/*eval*` tooling are kept (small, no disk risk) since they're proven
+correct on the astropy case — resuming just needs more disk than this laptop
+should spend, e.g. a cloud VM with real storage. `run_qwen_100` and
+`run_qwen_temp1_b_222103` remain unscored by any trustworthy method as of this
+writing.
+
 ### Tillicum serving — the fix chain (Aug 9 2026)
 
 Standing up vLLM 0.21.0 for full-weights Qwen3.6 on a Tillicum H200 required a
