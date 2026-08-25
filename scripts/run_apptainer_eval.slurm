@@ -8,9 +8,10 @@
 # QEMU emulation and no --platform workaround (both needed on the Mac's M3).
 #
 # Defaults to the checkpoint partition (ckpt-all): ~1024 idle CPUs there, so it
-# schedules immediately, and the runner is resumable (per-instance report cache
-# under $WORKDIR/reports), so a preemption just means resubmitting — it picks up
-# where it left off. Override PARTITION=compute for a non-preemptible run.
+# schedules immediately, and the runner is resumable (per-instance reports cached
+# under logs/apptainer_eval/<run_id>/, tracked in git), so a preemption just means
+# resubmitting — it picks up where it left off. Edit the #SBATCH --partition line
+# below to compute/cpu-g2 for a non-preemptible run.
 #
 # Submit (after scripts/install_klone_eval_venv.sh has been run once):
 #   sbatch --export=PREDS=runs/run_qwen_20_216375/preds.json,RUN_ID=run_qwen_20_216375 \
@@ -18,7 +19,9 @@
 #
 # Optional --export knobs: WORKERS (default 4), INSTANCE_IDS (comma list subset),
 # OVERLAY_MODE (overlay|tmpfs, default overlay), TIMEOUT (per-instance s),
-# DATASET (default SWE-bench/SWE-bench_Verified).
+# DATASET (default SWE-bench/SWE-bench_Verified), OVERWRITE=1 (re-grade every
+# instance from scratch, ignoring cached per-instance reports — use it to redo a
+# run whose earlier attempt errored; omit it to resume/skip already-graded ones).
 # =============================================================================
 #SBATCH --job-name=sweb-eval
 #SBATCH --account=stf
@@ -63,6 +66,7 @@ source klone-eval-venv/bin/activate
 echo ">>> Scoring $RUN_ID from $PREDS (workers=$WORKERS, overlay=$OVERLAY_MODE)"
 EXTRA_ARGS=()
 [ -n "${INSTANCE_IDS:-}" ] && EXTRA_ARGS+=(--instance-ids "$INSTANCE_IDS")
+[ "${OVERWRITE:-0}" = "1" ] && EXTRA_ARGS+=(--overwrite)
 
 python scripts/run_apptainer_eval.py \
   --preds "$PREDS" \
