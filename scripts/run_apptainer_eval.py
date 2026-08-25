@@ -25,11 +25,15 @@ What is and isn't reimplemented:
     image. The apply logic mirrors the harness's GIT_APPLY_CMDS fallback chain
     exactly.
 
-Writes: SIFs are read-only, and the images run as root (git apply must modify
-root-owned files under /testbed), so each exec uses --fakeroot plus a per-
-instance writable --overlay (ext3, sparse, deleted after). --writable-tmpfs is
-selectable via OVERLAY_MODE=tmpfs but its size is capped by apptainer.conf and
-may be too small for a test suite's writes -- overlay is the safe default.
+Writes: SIFs are read-only, so each exec needs a writable layer. Default is
+--fakeroot (maps us to root -- the images expect root, and git apply must
+modify /testbed) + a per-instance DIRECTORY --overlay on scratch (disk-backed,
+no size cap, deleted after). This combination was validated on Klone, incl. an
+800MB write; note an ext3 --overlay *image* instead FAILS there with an
+unwritable overlay upper dir, because the user isn't in /etc/subuid so fakeroot
+falls back to a setuid root-mapped namespace. --writable-tmpfs is selectable
+via OVERLAY_MODE=tmpfs (RAM-backed fallback; also works but capped by
+apptainer.conf / job memory).
 
 Resumable: each instance's report is cached under <logs_dir>/<run_id>/. A rerun
 (e.g. after a checkpoint-partition preemption) skips already-graded instances.
@@ -224,25 +228,17 @@ def evaluate_instance(
     (inst_dir / "run_wrapper.sh").write_text(WRAPPER_SH)
     test_output_path = inst_dir / "test_output.log"
 
-    # 3. Build the exec, with a per-instance writable overlay
-    overlay_path = None
+    # 3. Build the exec with a per-instance writable layer. Default: a plain
+    # DIRECTORY overlay on scratch -- --fakeroot maps us to root, and a
+    # directory (not an ext3 image) is what works under Klone's no-subuid
+    # setuid-apptainer fakeroot; it's disk-backed so there's no size cap.
+    overlay_dir = None
     exec_cmd = ["apptainer", "exec", "--fakeroot"]
     if args.overlay_mode == "overlay":
-        overlay_path = Path(args.sif_dir) / f"overlay_{instance_id}.img"
-        rc, ov_out = run_subprocess(
-            ["apptainer", "overlay", "create", "--size", str(args.overlay_mb),
-             str(overlay_path)],
-            timeout=300,
-        )
-        if rc != 0:
-            (logs_dir / "overlay.log").write_text(ov_out)
-            sif_path.unlink(missing_ok=True)
-            rm = {instance_id: {"patch_exists": True, "resolved": False,
-                                "patch_successfully_applied": False, "infra_failure": True}}
-            log(f"[ERROR] {instance_id}: overlay create failed (see {logs_dir}/overlay.log)")
-            return finalize(rm, "error", "overlay_create_failed")
-        exec_cmd += ["--overlay", str(overlay_path)]
-    else:  # tmpfs
+        overlay_dir = Path(args.sif_dir) / f"overlay_{instance_id}"
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+        exec_cmd += ["--overlay", str(overlay_dir)]
+    else:  # tmpfs -- RAM-backed fallback (capped by apptainer.conf / job mem)
         exec_cmd += ["--writable-tmpfs"]
     exec_cmd += ["--bind", f"{inst_dir}:/swebench_eval", str(sif_path),
                  "bash", "/swebench_eval/run_wrapper.sh"]
@@ -268,8 +264,8 @@ def evaluate_instance(
     # 6. Cleanup image + overlay (the whole point -- keep peak disk to ~1 image)
     if not args.keep_sif:
         sif_path.unlink(missing_ok=True)
-    if overlay_path is not None:
-        overlay_path.unlink(missing_ok=True)
+    if overlay_dir is not None:
+        shutil.rmtree(overlay_dir, ignore_errors=True)
 
     entry = report_map.get(instance_id, {})
     resolved = entry.get("resolved", False)
@@ -338,8 +334,9 @@ def main():
                         "keep this INSIDE the repo (tracked in git), not on scratch")
     p.add_argument("--report-dir", default="local-eval-reports")
     p.add_argument("--overlay-mode", choices=["overlay", "tmpfs"],
-                   default=os.environ.get("OVERLAY_MODE", "overlay"))
-    p.add_argument("--overlay-mb", type=int, default=int(os.environ.get("OVERLAY_MB", "8192")))
+                   default=os.environ.get("OVERLAY_MODE", "overlay"),
+                   help="overlay=per-instance directory overlay on scratch (default, disk-backed); "
+                        "tmpfs=--writable-tmpfs (RAM-backed fallback)")
     p.add_argument("--keep-sif", action="store_true", help="don't delete .sif after each instance (debug)")
     p.add_argument("--keep-work", action="store_true", help="don't delete per-instance workdir (debug)")
     p.add_argument("--overwrite", action="store_true", help="ignore cached per-instance reports")
