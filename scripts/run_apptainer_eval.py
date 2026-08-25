@@ -31,8 +31,21 @@ instance writable --overlay (ext3, sparse, deleted after). --writable-tmpfs is
 selectable via OVERLAY_MODE=tmpfs but its size is capped by apptainer.conf and
 may be too small for a test suite's writes -- overlay is the safe default.
 
-Resumable: each instance's report is cached under <work_dir>/reports/. A rerun
+Resumable: each instance's report is cached under <logs_dir>/<run_id>/. A rerun
 (e.g. after a checkpoint-partition preemption) skips already-graded instances.
+
+Where things live -- deliberately split by durability, not convenience:
+  * <logs_dir>/<run_id>/<instance_id>/  (default logs/apptainer_eval/<run_id>/,
+    INSIDE the repo, tracked in git): report.json, apply.log, exec.log,
+    test_output.log. Small text, and the actual evidence of what happened --
+    Klone/Hyak scratch is untrusted (no backup, purged after 60 days idle), so
+    this is the same reasoning that already keeps Slurm logs/ out of
+    .gitignore, applied consistently here.
+  * <work_dir>/ (default apptainer_eval/, point WORK_DIR/SIF_DIR at
+    /gscratch/scrubbed -- see the .slurm wrapper): .sif images, overlay .img
+    files, staged patch/eval-script files. Large but trivially regenerable
+    (re-pullable from DockerHub in minutes), so scratch is the right place and
+    losing it costs nothing.
 """
 from __future__ import annotations
 
@@ -153,10 +166,14 @@ def evaluate_instance(
     args,
 ) -> dict:
     """Full lifecycle for one instance. Returns the swebench report_map entry
-    (dict keyed by instance_id) augmented with a top-level 'stage'/'reason'."""
-    reports_dir = Path(args.work_dir) / "reports"
+    (dict keyed by instance_id) augmented with a top-level 'stage'/'reason'.
+
+    Durable evidence (report.json, apply.log, exec.log, test_output.log) is
+    written to logs_dir (tracked in git); only regenerable scratch (.sif,
+    overlay, staged patch/eval files) lives under work_dir."""
+    logs_dir = Path(args.logs_dir) / instance_id
     inst_dir = Path(args.work_dir) / "instances" / instance_id
-    report_path = reports_dir / f"{instance_id}.json"
+    report_path = logs_dir / "report.json"
 
     # Resume: reuse a cached report from an earlier (possibly preempted) run.
     if report_path.exists() and not args.overwrite:
@@ -164,6 +181,7 @@ def evaluate_instance(
         log(f"[skip] {instance_id}: cached ({cached.get('stage')})")
         return cached
 
+    logs_dir.mkdir(parents=True, exist_ok=True)
     inst_dir.mkdir(parents=True, exist_ok=True)
     model_patch = pred.get("model_patch") or ""
     pred_for_grading = {
@@ -178,7 +196,6 @@ def evaluate_instance(
         if reason:
             entry["reason"] = reason
         report_map[instance_id] = entry
-        reports_dir.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(entry, indent=2))
         if not args.keep_work:
             shutil.rmtree(inst_dir, ignore_errors=True)
@@ -195,10 +212,10 @@ def evaluate_instance(
     log(f"[pull] {instance_id}: {test_spec.image}")
     ok, pull_out = pull_image(test_spec.image, sif_path)
     if not ok:
-        (inst_dir / "pull.log").write_text(pull_out)
+        (logs_dir / "pull.log").write_text(pull_out)
         rm = {instance_id: {"patch_exists": True, "resolved": False,
                             "patch_successfully_applied": False, "infra_failure": True}}
-        log(f"[ERROR] {instance_id}: image pull failed")
+        log(f"[ERROR] {instance_id}: image pull failed (see {logs_dir}/pull.log)")
         return finalize(rm, "error", "pull_failed")
 
     # 2. Stage patch + eval script + wrapper for the bind mount
@@ -218,11 +235,11 @@ def evaluate_instance(
             timeout=300,
         )
         if rc != 0:
-            (inst_dir / "overlay.log").write_text(ov_out)
+            (logs_dir / "overlay.log").write_text(ov_out)
             sif_path.unlink(missing_ok=True)
             rm = {instance_id: {"patch_exists": True, "resolved": False,
                                 "patch_successfully_applied": False, "infra_failure": True}}
-            log(f"[ERROR] {instance_id}: overlay create failed")
+            log(f"[ERROR] {instance_id}: overlay create failed (see {logs_dir}/overlay.log)")
             return finalize(rm, "error", "overlay_create_failed")
         exec_cmd += ["--overlay", str(overlay_path)]
     else:  # tmpfs
@@ -233,14 +250,15 @@ def evaluate_instance(
     # 4. Run
     log(f"[run]  {instance_id}: applying patch + running tests")
     rc, run_out = run_subprocess(exec_cmd, timeout=args.timeout)
-    (inst_dir / "exec.log").write_text(run_out)
+    (logs_dir / "exec.log").write_text(run_out)
+    if (inst_dir / "apply.log").exists():
+        shutil.copyfile(inst_dir / "apply.log", logs_dir / "apply.log")
 
     if rc == -1 and not test_output_path.exists():
         test_output_path.write_text(TESTS_TIMEOUT)
 
     # 5. Grade with swebench's own function (copy log out before cleanup)
-    graded_log = reports_dir / f"{instance_id}.test_output.log"
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    graded_log = logs_dir / "test_output.log"
     if test_output_path.exists():
         shutil.copyfile(test_output_path, graded_log)
     else:
@@ -262,7 +280,8 @@ def evaluate_instance(
         stage = "unresolved"
     else:
         stage = "error"  # applied-but-no-output / apply-failed / timeout
-    log(f"[done] {instance_id}: {stage}")
+    detail = f" (see {logs_dir}/exec.log, apply.log, test_output.log)" if stage == "error" else ""
+    log(f"[done] {instance_id}: {stage}{detail}")
     return finalize(report_map, stage)
 
 
@@ -310,9 +329,13 @@ def main():
     p.add_argument("--instance-ids", default=None, help="comma-separated subset (default: all in preds)")
     p.add_argument("--workers", type=int, default=int(os.environ.get("WORKERS", "4")))
     p.add_argument("--timeout", type=int, default=1800, help="per-instance test timeout (s)")
-    p.add_argument("--work-dir", default=os.environ.get("APPTAINER_EVAL_WORKDIR", "apptainer_eval"))
+    p.add_argument("--work-dir", default=os.environ.get("APPTAINER_EVAL_WORKDIR", "apptainer_eval"),
+                   help="scratch working dir for regenerable staging files (point at /gscratch/scrubbed)")
     p.add_argument("--sif-dir", default=os.environ.get("APPTAINER_EVAL_SIFDIR", None),
                    help="where .sif + overlay files live (default: <work-dir>/sif). Point at scratch.")
+    p.add_argument("--logs-dir", default=os.environ.get("APPTAINER_EVAL_LOGSDIR", "logs/apptainer_eval"),
+                   help="durable per-instance logs (report.json, apply/exec/test_output.log) -- "
+                        "keep this INSIDE the repo (tracked in git), not on scratch")
     p.add_argument("--report-dir", default="local-eval-reports")
     p.add_argument("--overlay-mode", choices=["overlay", "tmpfs"],
                    default=os.environ.get("OVERLAY_MODE", "overlay"))
@@ -324,9 +347,10 @@ def main():
 
     if args.sif_dir is None:
         args.sif_dir = str(Path(args.work_dir) / "sif")
+    args.logs_dir = str(Path(args.logs_dir) / args.run_id)
     Path(args.work_dir).mkdir(parents=True, exist_ok=True)
     Path(args.sif_dir).mkdir(parents=True, exist_ok=True)
-    (Path(args.work_dir) / "reports").mkdir(parents=True, exist_ok=True)
+    Path(args.logs_dir).mkdir(parents=True, exist_ok=True)
 
     preds_raw = json.loads(Path(args.preds).read_text())
     if isinstance(preds_raw, list):

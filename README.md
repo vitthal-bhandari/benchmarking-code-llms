@@ -127,9 +127,17 @@ natively (no emulation).
 bash scripts/install_klone_eval_venv.sh    # one-time, on a Klone LOGIN node
 sbatch --export=PREDS=runs/<run>/preds.json,RUN_ID=<run_id> \
   scripts/run_apptainer_eval.slurm          # CPU-only job (default: ckpt-all)
-# -> local-eval-reports/<run_id>.json (tracked). Resumable: rerun to continue
-#    after a checkpoint-partition preemption (per-instance reports are cached).
+# -> local-eval-reports/<run_id>.json (tracked, summary). Resumable: rerun to
+#    continue after a checkpoint-partition preemption (per-instance reports
+#    are cached under logs/apptainer_eval/<run_id>/<instance_id>/).
 ```
+
+Per-instance diagnostics (`report.json`, `apply.log`, `exec.log`, `test_output.log`)
+land in `logs/apptainer_eval/<run_id>/<instance_id>/` — **tracked in git**, not
+left on Klone scratch, since `/gscratch/scrubbed` is unbacked-up and purged
+after 60 days idle (same reasoning as the rest of `logs/`). Only the large,
+trivially-regenerable pieces (`.sif` images, overlays, staged patch/eval
+files) live on scratch, deleted after each instance.
 
 **B) Mac + Docker/Colima (fallback — only if you have real free disk).** Same
 official harness (`swebench eval`) against Docker on a laptop. Correct, but the
