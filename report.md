@@ -149,6 +149,44 @@ The rest of the "plausible but not exact" mechanism description below, and the
 `run_qwen_100`/temp=1.0 comparison numbers, are pending re-score with the same
 local harness — do not cite the old 0% figures for those until updated here.
 
+### First trustworthy multi-repo B1 result — Qwen3.6-35B-A3B, 99 instances (Aug 25 2026)
+
+Scored via the Apptainer harness on Klone (`scripts/run_apptainer_eval.slurm`);
+cross-validated against Mac/Docker on the 20-subset (both 10/20, instance-for-
+instance), so the backend is trusted. Breakdown produced by
+`scripts/analyze_eval.py` (joins eval outcome × generation trajectory).
+
+**Qwen3.6-35B-A3B · SWE-bench Verified · B1 (mini-swe-agent, no memory, temp=0)
+· 99 instances (astropy + django):**
+- **Raw resolve rate: 58/99 = 58.6%**
+- **Fair resolve rate: 58/78 = 74.4%** (of instances that applied + ran tests)
+- Consistent across repos: astropy 13/21 (62%), django 45/78 (58%) — not a
+  single-repo artifact.
+
+This **retracts the entire "~0% Pass@1" narrative** — that was the broken sb-cli
+scorer (see the Aug 20 correction above), never the model. 58.6% raw is squarely
+in the expected band for a strong ~30B MoE on a deliberately minimal ReAct
+harness, and is the **B1 floor** the eventual memory contribution (B2) must beat.
+
+Where the 41 non-resolved went (harness/infra vs. genuine capability):
+
+| Category | N | Kind |
+|---|---:|---|
+| Unresolved (applied + tests ran, fix wrong/incomplete) | 20 | **Genuine capability miss** — the honest B1 ceiling |
+| Empty — step-limit loop (250-step cap, no patch) | 12 | Harness/infra — **largest recoverable bucket**; consistent with temp=0 greedy-decoding loops (the temp=1.0 experiment targets exactly this) |
+| Apply-failed — malformed (non-diff output) | 4 | Generation/format failure |
+| Empty — context-exceeded / gen-timeout / other | 4 | Infra |
+| Apply-failed — other (git apply drift) | 1 | Infra |
+
+Key framing: **21 of 41 non-resolved are harness/infra losses, not the model
+being wrong** — so the fair 74.4% is the honest capability number, and the
+12 step-limit loops are a concrete, testable improvement lever. Note the
+`14508` prefix-corruption case now lands in *unresolved* (it applied via the
+`--3way`/`--reject` fallback chain this run) rather than erroring — the bug is
+fragile-by-luck, still worth fixing but it didn't cost a point here.
+
+---
+
 **Local Docker scoring paused (disk) — `run_qwen_20_216375` is the only run
 re-scored so far.** SWE-bench's per-instance eval images are large (~4GB
 shared base per repo, but *read-only image layers alone* for the full
