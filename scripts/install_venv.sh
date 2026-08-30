@@ -14,7 +14,7 @@
 # requirements-working.txt (a pip freeze of a known-good serving env) is the
 # authoritative snapshot; re-run `pip freeze > requirements-working.txt` after
 # any interactive fix. Do NOT `uv sync` the serving env: it reverts vLLM to a 
-# pinned-but-broken version that doesn't recognize Qwen3.6 (qwen3_5_moe).
+# pinned-but-broken version that doesn't recognize Qwen3.6 (qwen3_5_moe). 
 #
 # Default is full-weights (BF16) models, which don't need DeepGEMM at all — on
 # H200's 141GB there's no need to fight FP8 for memory the way L40S required.
