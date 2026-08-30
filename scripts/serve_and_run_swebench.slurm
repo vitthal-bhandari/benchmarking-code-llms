@@ -46,6 +46,12 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 # --- server config -----------------------------------------------------------
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.6-35B-A3B}"
 PORT="${PORT:-8000}"
+# Which venv serves the model. Default .venv is the vLLM-0.21 stack pinned for
+# Qwen3.6. Newer 2026 models (Gemma4's per-layer head_dim, North-Mini-Code's
+# hybrid MoE) need model code that 0.21 predates — point them at a separate
+# newer-vLLM venv (e.g. SERVE_VENV=.venv-new, built by install_venv_new.sh) so
+# Qwen keeps serving on the stable stack. The agent/driver venv is unaffected.
+SERVE_VENV="${SERVE_VENV:-.venv}"
 # Empty = omit --max-model-len entirely, so vLLM reads the model's own native
 # max from its config (generalizes across models with different native limits,
 # unlike hardcoding one number). Safe as the default specifically because we're
@@ -98,7 +104,7 @@ mkdir -p "$VLLM_CACHE_ROOT" "$HF_HUB_CACHE" "$TORCH_HOME"
 # to the startup crashes hit during initial setup.
 module load gcc/11.5.0 2>/dev/null || true
 
-export CUDA_HOME="$PROJECT_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
+export CUDA_HOME="$PROJECT_DIR/$SERVE_VENV/lib/python3.11/site-packages/nvidia/cu13"
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
 [ -e "$CUDA_HOME/lib64" ] || ln -sf lib "$CUDA_HOME/lib64" 2>/dev/null || true
@@ -132,7 +138,7 @@ echo ">>> [server] Starting $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID
 echo ">>> [server] gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: ${MAX_MODEL_LEN:-native/model default}  |  kv_cache: ${KV_CACHE_DTYPE:-default}  |  moe_backend: ${MOE_BACKEND:-auto}"
 
 (
-  source .venv/bin/activate
+  source "$SERVE_VENV/bin/activate"
   exec vllm serve "$MODEL_NAME" \
     --host 0.0.0.0 --port "$PORT" \
     --dtype auto --trust-remote-code --enforce-eager \
@@ -165,15 +171,22 @@ done
 echo ">>> [server] Ready after ${waited}s."
 
 # Point the agent at this same node — no manual api_override editing needed.
+# api_base is the ONLY thing we inject: it's infra (where the server landed),
+# not a sampling choice. We deliberately send NO temperature/top_p by default,
+# so requests fall through to each model's own generation_config.json — the
+# vendor-recommended, reproducible defaults (mini-swe-agent itself sets none).
+# The old hardcoded temperature=0 was a self-imposed greedy-decoding choice
+# plausibly behind the step-limit-loop failures; it's gone. Override only if a
+# specific experiment needs it: TEMPERATURE=1.0 (or =0) writes the line back.
 API_OVERRIDE="configs/api_override_inline_${SLURM_JOB_ID:-local}.yaml"
 cat > "$API_OVERRIDE" << EOF
 model:
   model_kwargs:
     api_base: http://localhost:${PORT}/v1
-    temperature: 0
 EOF
+[ -n "${TEMPERATURE:-}" ] && echo "    temperature: ${TEMPERATURE}" >> "$API_OVERRIDE"
 
-echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS | Output: $OUTPUT_DIR"
+echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS | Temperature: ${TEMPERATURE:-model default (none sent)} | Output: $OUTPUT_DIR"
 (
   source agent-venv/bin/activate
   export MSWEA_COST_TRACKING='ignore_errors'
