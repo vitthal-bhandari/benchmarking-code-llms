@@ -109,7 +109,14 @@ export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
 export TORCH_HOME="/gpfs/scrubbed/$USER/.cache/torch"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export VLLM_CACHE_ROOT="/gpfs/scrubbed/$USER/.cache/vllm"
-mkdir -p "$VLLM_CACHE_ROOT" "$HF_HUB_CACHE" "$TORCH_HOME"
+# Singularity/Apptainer cache for the per-instance SWE-bench sandbox images
+# mini-swe-agent pulls from Docker Hub. PERSISTENT + on scratch (not the 10GB
+# home default) so the images download ONCE and are reused across every run and
+# every model — the 3 models share the same 125 images. Without this each run
+# re-pulls 125 images and hammers Docker Hub's pull-rate limit.
+export SINGULARITY_CACHEDIR="/gpfs/scrubbed/$USER/.cache/singularity"
+export APPTAINER_CACHEDIR="$SINGULARITY_CACHEDIR"
+mkdir -p "$VLLM_CACHE_ROOT" "$HF_HUB_CACHE" "$TORCH_HOME" "$SINGULARITY_CACHEDIR"
 
 # No-op in practice on Tillicum (system g++ is already 11.5.0); kept as a
 # harmless safety net. See MOE_BACKEND / LIMIT_MM below for the actual fixes
@@ -129,6 +136,22 @@ export FLASHINFER_DISABLE_VERSION_CHECK=1
 
 [ -f "$PROJECT_DIR/.env" ] && source <(grep -v '^#' "$PROJECT_DIR/.env" | sed 's/ *#.*//')
 export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN:-}"
+# Docker Hub auth for pulling SWE-bench sandbox images. Anonymous pulls are
+# capped at 100/6h per IP and get exhausted by a 125-instance run (every
+# instance failed with TOOMANYREQUESTS). A free Docker Hub account raises this
+# to 200/6h — enough for one 125-run, and the persistent cache above means the
+# other models reuse those images (0 extra pulls). Put DOCKER_USERNAME and
+# DOCKER_TOKEN (a Docker Hub access token) in .env; they map to the vars
+# Singularity/Apptainer read. Harmless if unset (falls back to anonymous).
+if [ -n "${DOCKER_USERNAME:-}" ] && [ -n "${DOCKER_TOKEN:-}" ]; then
+  export SINGULARITY_DOCKER_USERNAME="$DOCKER_USERNAME"
+  export SINGULARITY_DOCKER_PASSWORD="$DOCKER_TOKEN"
+  export APPTAINER_DOCKER_USERNAME="$DOCKER_USERNAME"
+  export APPTAINER_DOCKER_PASSWORD="$DOCKER_TOKEN"
+  echo ">>> [server] Docker Hub auth enabled for user $DOCKER_USERNAME (raises pull limit)"
+else
+  echo ">>> [server] WARNING: no DOCKER_USERNAME/DOCKER_TOKEN in .env — anonymous Docker Hub pulls (100/6h) may rate-limit a large run"
+fi
 
 QUANT_ARGS=(); [ -n "$QUANTIZATION" ] && QUANT_ARGS=(--quantization "$QUANTIZATION")
 BATCH_ARGS=(); [ -n "$MAX_NUM_BATCHED_TOKENS" ] && BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
