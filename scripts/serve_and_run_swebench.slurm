@@ -79,12 +79,24 @@ MOE_BACKEND="${MOE_BACKEND:-triton}"
 AGENT_MODEL_NAME="${AGENT_MODEL_NAME:-hosted_vllm/$MODEL_NAME}"
 SLICE="${SLICE:-0:20}"
 WORKERS="${WORKERS:-4}"
-# Auto-append the job id so repeated runs of the same config get distinct dirs
-# (mini-swe-agent RESUMES an existing OUTPUT_DIR — skipping instances already
-# present — so without a unique suffix two runs would silently merge). The
-# suffix also ties the run dir directly to its logs/swebench_run_<jobid>.* .
+# OUTPUT_DIR handling. mini-swe-agent RESUMES an existing OUTPUT_DIR — it skips
+# instances whose output is already present and runs only the missing ones, and
+# it accumulates them all into one preds.json.
+#
+#   RESUME unset/0 (default): append the job id, so each run of the SAME config
+#     gets a distinct dir — two runs can't silently merge. Safe default.
+#
+#   RESUME=1: use OUTPUT_DIR verbatim as a STABLE per-model accumulator. Run
+#     SLICE=0:125 today; later just re-submit the identical command with
+#     SLICE=0:250 (or 0:500) into the same dir — the first 125 are skipped and
+#     only the remainder runs, into one growing preds.json you score once. Use
+#     ONLY with an IDENTICAL config (same model, parser, params); mixing e.g.
+#     temperatures into one dir corrupts the run. One writer per dir — don't
+#     point two concurrent jobs at the same RESUME dir.
 OUTPUT_DIR="${OUTPUT_DIR:-runs/run}"
-OUTPUT_DIR="${OUTPUT_DIR}_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
+if [ "${RESUME:-0}" != "1" ]; then
+  OUTPUT_DIR="${OUTPUT_DIR}_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
+fi
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-1800}"   # 30 min — full-weights loads varied 100-1100s on Klone under FS contention
 
 PROJECT_DIR="/gpfs/projects/stf/$USER/benchmarking-code-llms"
