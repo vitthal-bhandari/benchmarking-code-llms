@@ -144,18 +144,24 @@ if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0}'; fi
 MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
 MOE_ARGS=(); [ -n "$MOE_BACKEND" ] && MOE_ARGS=(--kernel-config.moe_backend "$MOE_BACKEND")
 MAX_LEN_ARGS=(); [ -n "$MAX_MODEL_LEN" ] && MAX_LEN_ARGS=(--max-model-len "$MAX_MODEL_LEN")
+# --enforce-eager disables CUDA graphs + torch.compile — a big inference
+# slowdown. It was a leftover from 0.21 debugging; leaving it on throttled
+# Gemma4 to ~30 tok/s (a single step ran past litellm's 600s timeout). Default
+# OFF now (CUDA graphs on = fast, and it's vLLM's own default). Set
+# ENFORCE_EAGER=1 only if a model's graph capture proves unstable on 0.28.
+EAGER_ARGS=(); [ -n "${ENFORCE_EAGER:-}" ] && EAGER_ARGS=(--enforce-eager)
 
 SERVER_LOG="logs/vllm_serve_inline_${SLURM_JOB_ID:-local}.log"
 echo ">>> [server] Starting $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
-echo ">>> [server] gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: ${MAX_MODEL_LEN:-native/model default}  |  kv_cache: ${KV_CACHE_DTYPE:-default}  |  moe_backend: ${MOE_BACKEND:-auto}"
+echo ">>> [server] venv: $SERVE_VENV  |  max_model_len: ${MAX_MODEL_LEN:-native/model default}  |  moe_backend: ${MOE_BACKEND:-auto}  |  enforce_eager: ${ENFORCE_EAGER:-off (CUDA graphs on)}"
 
 (
   source "$SERVE_VENV/bin/activate"
   exec vllm serve "$MODEL_NAME" \
     --host 0.0.0.0 --port "$PORT" \
-    --dtype auto --trust-remote-code --enforce-eager \
+    --dtype auto --trust-remote-code \
     --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER" \
-    "${MAX_LEN_ARGS[@]}" "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}" "${MM_ARGS[@]}" "${MOE_ARGS[@]}"
+    "${EAGER_ARGS[@]}" "${MAX_LEN_ARGS[@]}" "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}" "${MM_ARGS[@]}" "${MOE_ARGS[@]}"
 ) > "$SERVER_LOG" 2>&1 &
 VLLM_PID=$!
 
