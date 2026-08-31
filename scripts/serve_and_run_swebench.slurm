@@ -46,6 +46,12 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 # --- server config -----------------------------------------------------------
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.6-35B-A3B}"
 PORT="${PORT:-8000}"
+# Which venv serves the model. Default .venv is the vLLM-0.21 stack pinned for
+# Qwen3.6. Newer 2026 models (Gemma4's per-layer head_dim, North-Mini-Code's
+# hybrid MoE) need model code that 0.21 predates — point them at a separate
+# newer-vLLM venv (e.g. SERVE_VENV=.venv-new, built by install_venv_new.sh) so
+# Qwen keeps serving on the stable stack. The agent/driver venv is unaffected.
+SERVE_VENV="${SERVE_VENV:-.venv}"
 # Empty = omit --max-model-len entirely, so vLLM reads the model's own native
 # max from its config (generalizes across models with different native limits,
 # unlike hardcoding one number). Safe as the default specifically because we're
@@ -73,12 +79,24 @@ MOE_BACKEND="${MOE_BACKEND:-triton}"
 AGENT_MODEL_NAME="${AGENT_MODEL_NAME:-hosted_vllm/$MODEL_NAME}"
 SLICE="${SLICE:-0:20}"
 WORKERS="${WORKERS:-4}"
-# Auto-append the job id so repeated runs of the same config get distinct dirs
-# (mini-swe-agent RESUMES an existing OUTPUT_DIR — skipping instances already
-# present — so without a unique suffix two runs would silently merge). The
-# suffix also ties the run dir directly to its logs/swebench_run_<jobid>.* .
+# OUTPUT_DIR handling. mini-swe-agent RESUMES an existing OUTPUT_DIR — it skips
+# instances whose output is already present and runs only the missing ones, and
+# it accumulates them all into one preds.json.
+#
+#   RESUME unset/0 (default): append the job id, so each run of the SAME config
+#     gets a distinct dir — two runs can't silently merge. Safe default.
+#
+#   RESUME=1: use OUTPUT_DIR verbatim as a STABLE per-model accumulator. Run
+#     SLICE=0:125 today; later just re-submit the identical command with
+#     SLICE=0:250 (or 0:500) into the same dir — the first 125 are skipped and
+#     only the remainder runs, into one growing preds.json you score once. Use
+#     ONLY with an IDENTICAL config (same model, parser, params); mixing e.g.
+#     temperatures into one dir corrupts the run. One writer per dir — don't
+#     point two concurrent jobs at the same RESUME dir.
 OUTPUT_DIR="${OUTPUT_DIR:-runs/run}"
-OUTPUT_DIR="${OUTPUT_DIR}_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
+if [ "${RESUME:-0}" != "1" ]; then
+  OUTPUT_DIR="${OUTPUT_DIR}_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
+fi
 STARTUP_TIMEOUT_S="${STARTUP_TIMEOUT_S:-1800}"   # 30 min — full-weights loads varied 100-1100s on Klone under FS contention
 
 PROJECT_DIR="/gpfs/projects/stf/$USER/benchmarking-code-llms"
@@ -98,7 +116,7 @@ mkdir -p "$VLLM_CACHE_ROOT" "$HF_HUB_CACHE" "$TORCH_HOME"
 # to the startup crashes hit during initial setup.
 module load gcc/11.5.0 2>/dev/null || true
 
-export CUDA_HOME="$PROJECT_DIR/.venv/lib/python3.11/site-packages/nvidia/cu13"
+export CUDA_HOME="$PROJECT_DIR/$SERVE_VENV/lib/python3.11/site-packages/nvidia/cu13"
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
 [ -e "$CUDA_HOME/lib64" ] || ln -sf lib "$CUDA_HOME/lib64" 2>/dev/null || true
@@ -126,18 +144,24 @@ if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0}'; fi
 MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
 MOE_ARGS=(); [ -n "$MOE_BACKEND" ] && MOE_ARGS=(--kernel-config.moe_backend "$MOE_BACKEND")
 MAX_LEN_ARGS=(); [ -n "$MAX_MODEL_LEN" ] && MAX_LEN_ARGS=(--max-model-len "$MAX_MODEL_LEN")
+# --enforce-eager disables CUDA graphs + torch.compile — a big inference
+# slowdown. It was a leftover from 0.21 debugging; leaving it on throttled
+# Gemma4 to ~30 tok/s (a single step ran past litellm's 600s timeout). Default
+# OFF now (CUDA graphs on = fast, and it's vLLM's own default). Set
+# ENFORCE_EAGER=1 only if a model's graph capture proves unstable on 0.28.
+EAGER_ARGS=(); [ -n "${ENFORCE_EAGER:-}" ] && EAGER_ARGS=(--enforce-eager)
 
 SERVER_LOG="logs/vllm_serve_inline_${SLURM_JOB_ID:-local}.log"
 echo ">>> [server] Starting $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
-echo ">>> [server] gcc: $(command -v g++ 2>/dev/null || echo none)  |  max_model_len: ${MAX_MODEL_LEN:-native/model default}  |  kv_cache: ${KV_CACHE_DTYPE:-default}  |  moe_backend: ${MOE_BACKEND:-auto}"
+echo ">>> [server] venv: $SERVE_VENV  |  max_model_len: ${MAX_MODEL_LEN:-native/model default}  |  moe_backend: ${MOE_BACKEND:-auto}  |  enforce_eager: ${ENFORCE_EAGER:-off (CUDA graphs on)}"
 
 (
-  source .venv/bin/activate
+  source "$SERVE_VENV/bin/activate"
   exec vllm serve "$MODEL_NAME" \
     --host 0.0.0.0 --port "$PORT" \
-    --dtype auto --trust-remote-code --enforce-eager \
+    --dtype auto --trust-remote-code \
     --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER" \
-    "${MAX_LEN_ARGS[@]}" "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}" "${MM_ARGS[@]}" "${MOE_ARGS[@]}"
+    "${EAGER_ARGS[@]}" "${MAX_LEN_ARGS[@]}" "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}" "${MM_ARGS[@]}" "${MOE_ARGS[@]}"
 ) > "$SERVER_LOG" 2>&1 &
 VLLM_PID=$!
 
@@ -165,15 +189,30 @@ done
 echo ">>> [server] Ready after ${waited}s."
 
 # Point the agent at this same node — no manual api_override editing needed.
+# api_base is the ONLY thing we inject: it's infra (where the server landed),
+# not a sampling choice. We deliberately send NO temperature/top_p by default,
+# so requests fall through to each model's own generation_config.json — the
+# vendor-recommended, reproducible defaults (mini-swe-agent itself sets none).
+# The old hardcoded temperature=0 was a self-imposed greedy-decoding choice
+# plausibly behind the step-limit-loop failures; it's gone. Override only if a
+# specific experiment needs it: TEMPERATURE=1.0 (or =0) writes the line back.
 API_OVERRIDE="configs/api_override_inline_${SLURM_JOB_ID:-local}.yaml"
 cat > "$API_OVERRIDE" << EOF
 model:
   model_kwargs:
     api_base: http://localhost:${PORT}/v1
-    temperature: 0
 EOF
+[ -n "${TEMPERATURE:-}" ] && echo "    temperature: ${TEMPERATURE}" >> "$API_OVERRIDE"
+# MAX_TOKENS caps output per agent step. Without it, a model that rambles (e.g.
+# Gemma4's reasoning-tag runaway) generates toward its native max (262K), so a
+# single step runs past litellm's 600s client timeout and the run hangs. A cap
+# bounds each step and is what mini-swe-agent EXPECTS — its swebench.yaml
+# format_error_template explicitly handles finish_reason="length" by telling the
+# model to respond more concisely and retry. Uniform across models; harmless for
+# ones (Qwen) whose steps are already well under it. 8192 is a sane default.
+[ -n "${MAX_TOKENS:-}" ] && echo "    max_tokens: ${MAX_TOKENS}" >> "$API_OVERRIDE"
 
-echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS | Output: $OUTPUT_DIR"
+echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS | Temperature: ${TEMPERATURE:-model default} | Max_tokens: ${MAX_TOKENS:-model default (uncapped)} | Output: $OUTPUT_DIR"
 (
   source agent-venv/bin/activate
   export MSWEA_COST_TRACKING='ignore_errors'
