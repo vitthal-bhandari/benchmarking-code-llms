@@ -203,8 +203,16 @@ model:
     api_base: http://localhost:${PORT}/v1
 EOF
 [ -n "${TEMPERATURE:-}" ] && echo "    temperature: ${TEMPERATURE}" >> "$API_OVERRIDE"
+# MAX_TOKENS caps output per agent step. Without it, a model that rambles (e.g.
+# Gemma4's reasoning-tag runaway) generates toward its native max (262K), so a
+# single step runs past litellm's 600s client timeout and the run hangs. A cap
+# bounds each step and is what mini-swe-agent EXPECTS — its swebench.yaml
+# format_error_template explicitly handles finish_reason="length" by telling the
+# model to respond more concisely and retry. Uniform across models; harmless for
+# ones (Qwen) whose steps are already well under it. 8192 is a sane default.
+[ -n "${MAX_TOKENS:-}" ] && echo "    max_tokens: ${MAX_TOKENS}" >> "$API_OVERRIDE"
 
-echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS | Temperature: ${TEMPERATURE:-model default (none sent)} | Output: $OUTPUT_DIR"
+echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS | Temperature: ${TEMPERATURE:-model default} | Max_tokens: ${MAX_TOKENS:-model default (uncapped)} | Output: $OUTPUT_DIR"
 (
   source agent-venv/bin/activate
   export MSWEA_COST_TRACKING='ignore_errors'
