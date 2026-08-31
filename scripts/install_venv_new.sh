@@ -56,6 +56,12 @@ echo ">>> [$VENV] Installing transformers from git (newest model archs)..."
 # support (Gemma4/Cohere2) that a released transformers may lag.
 pip install --upgrade --no-cache-dir "git+https://github.com/huggingface/transformers.git"
 
+echo ">>> [$VENV] Installing cohere-melody (required by vLLM's cohere_command4 tool parser)..."
+# North-Mini-Code / Command models use --tool-call-parser cohere_command4, which
+# vLLM lazy-imports from the separate `cohere_melody` package. Without it the
+# server dies at startup: "cohere_command4 ... has not been registered".
+pip install --no-cache-dir "cohere-melody>=0.11.1"
+
 NVIDIA_DIR="$PROJECT_DIR/$VENV/lib/python3.11/site-packages/nvidia"
 echo ">>> [$VENV] Adding unversioned .so symlinks + lib64 for CUDA libs..."
 if [ -d "$NVIDIA_DIR/cu13/lib" ]; then
