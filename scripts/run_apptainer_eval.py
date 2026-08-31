@@ -146,16 +146,20 @@ def run_subprocess(cmd: list[str], timeout: int | None = None) -> tuple[int, str
 
 
 def pull_image(image: str, sif_path: Path, retries: int = 2) -> tuple[bool, str]:
-    """apptainer pull docker://<image> -> sif_path, no cache (we never re-pull
-    the same image, so caching only bloats scratch)."""
+    """apptainer pull docker://<image> -> sif_path.
+
+    Cache is ENABLED by default (uses APPTAINER_CACHEDIR): scoring multiple
+    models re-pulls the SAME 125 images, so caching turns 3x125=375 Docker Hub
+    pulls into 125 (each unique image downloaded once) — essential to avoid the
+    Hub pull-rate limit, and Klone scratch has room for the cache. Set
+    NO_PULL_CACHE=1 to force --disable-cache (the old disk-tight behavior)."""
+    no_cache = os.environ.get("NO_PULL_CACHE", "0") == "1"
+    cmd = ["apptainer", "pull"]
+    if no_cache:
+        cmd.append("--disable-cache")
+    cmd += ["--force", str(sif_path), f"docker://{image}"]
     for attempt in range(retries + 1):
-        rc, out = run_subprocess(
-            [
-                "apptainer", "pull", "--disable-cache", "--force",
-                str(sif_path), f"docker://{image}",
-            ],
-            timeout=1800,
-        )
+        rc, out = run_subprocess(cmd, timeout=1800)
         if rc == 0 and sif_path.exists():
             return True, out
         if attempt < retries:
@@ -323,6 +327,9 @@ def main():
     p.add_argument("--dataset", default="SWE-bench/SWE-bench_Verified")
     p.add_argument("--split", default="test")
     p.add_argument("--instance-ids", default=None, help="comma-separated subset (default: all in preds)")
+    p.add_argument("--slice", default=os.environ.get("EVAL_SLICE") or None,
+                   help="start:end index range over the SORTED instance ids, for splitting one "
+                        "run across parallel jobs (e.g. 0:25). Same --run-id across slices is safe.")
     p.add_argument("--workers", type=int, default=int(os.environ.get("WORKERS", "4")))
     p.add_argument("--timeout", type=int, default=1800, help="per-instance test timeout (s)")
     p.add_argument("--work-dir", default=os.environ.get("APPTAINER_EVAL_WORKDIR", "apptainer_eval"),
@@ -340,6 +347,10 @@ def main():
     p.add_argument("--keep-sif", action="store_true", help="don't delete .sif after each instance (debug)")
     p.add_argument("--keep-work", action="store_true", help="don't delete per-instance workdir (debug)")
     p.add_argument("--overwrite", action="store_true", help="ignore cached per-instance reports")
+    p.add_argument("--prefetch-only", action="store_true",
+                   help="pull every instance's image into the Apptainer cache and exit "
+                        "(no scoring). Run once before launching parallel scoring jobs so "
+                        "the 125 shared images download once and every job reuses them.")
     args = p.parse_args()
 
     if args.sif_dir is None:
@@ -357,6 +368,14 @@ def main():
 
     ids = [s.strip() for s in args.instance_ids.split(",")] if args.instance_ids else list(preds.keys())
     ids = [i for i in ids if i in preds]
+    # --slice start:end subsets the SORTED ids so several jobs can each take a
+    # disjoint chunk of the same run in parallel (same --run-id is fine: each
+    # instance writes its own report subdir, so disjoint slices never collide;
+    # re-run analyze_eval.py at the end for the merged breakdown).
+    if args.slice:
+        ids = sorted(ids)
+        a, b = args.slice.split(":")
+        ids = ids[int(a) if a else None:int(b) if b else None]
 
     log(f">>> Loading dataset {args.dataset} ({args.split}) for {len(ids)} instances")
     dataset = load_swebench_dataset(args.dataset, args.split, ids)
@@ -367,6 +386,30 @@ def main():
     if missing:
         log(f">>> WARNING: {len(missing)} instance(s) not in dataset, skipping: {missing}")
     ids = [i for i in ids if i in specs]
+
+    if args.prefetch_only:
+        log(f">>> PREFETCH: warming the Apptainer cache with {len(ids)} images, "
+            f"{args.workers} workers (no scoring)")
+        Path(args.sif_dir).mkdir(parents=True, exist_ok=True)
+        ok = fail = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {
+                ex.submit(pull_image, specs[iid].image,
+                          Path(args.sif_dir) / f"prefetch_{iid}.sif"): iid
+                for iid in ids
+            }
+            for fut in concurrent.futures.as_completed(futs):
+                iid = futs[fut]
+                success, _ = fut.result()
+                (Path(args.sif_dir) / f"prefetch_{iid}.sif").unlink(missing_ok=True)
+                if success:
+                    ok += 1
+                    log(f"[cached] {iid}")
+                else:
+                    fail += 1
+                    log(f"[FAIL]  {iid}: pull failed")
+        log(f">>> PREFETCH done: {ok} cached, {fail} failed. Cache: {os.environ.get('APPTAINER_CACHEDIR','?')}")
+        return
 
     log(f">>> Evaluating {len(ids)} instances, {args.workers} workers, "
         f"overlay_mode={args.overlay_mode}")
