@@ -46,6 +46,73 @@ allocated compute node, not the login node.
 
 ## Phase: MVP2 (Tillicum migration)
 
+### 3-MODEL COMPARISON — SWE-Bench Verified, 125 instances, B1 (Aug 31 2026)
+
+First full head-to-head. Generation on Tillicum H200s (mini-swe-agent, no
+memory, **default sampling** — no imposed temperature), scored on Klone via the
+Apptainer harness. Config is uniform across models except necessary per-model
+serving accommodations (tool-call parser; Gemma4/North on vLLM 0.28 via
+`.venv-new`; Gemma4 alone needs `MAX_TOKENS=8192` to not hang — see
+serving-recipes). Slice `0:125` (astropy + django).
+
+| Model | Raw resolve | Fair resolve (applied + ran) | Got to a fair test |
+|---|---|---|---|
+| **Qwen3.6-35B-A3B** | **62.4%** (78/125) | **79.6%** (78/98) | 98/125 |
+| Gemma4-26B-A4B | 37.6% (47/125) | 59.5% (47/79) | 79/125 |
+| North-Mini-Code-30B-A3B | 32.0% (40/125) | 59.7% (40/67) | 67/125 |
+
+**Ranking: Qwen ≫ Gemma4 ≈ North.** Qwen wins on both metrics by a wide margin.
+Gemma4 and North are nearly tied on *fair* rate (~59-60%) — comparable when they
+produce a runnable patch — but their *raw* rates crater because they far more
+often fail to produce one at all (the "got to a fair test" column: 98 vs 79 vs 67).
+
+**Default sampling helped Qwen** vs. the earlier temp=0 run (58.6% → 62.4% raw),
+consistent with the greedy-decoding-loop hypothesis. (Not a strict A/B — different
+N and instance set — but directional.)
+
+#### Failure taxonomy (Qwen & Gemma4), and what's fixable
+
+Joining each eval outcome with its generation exit status:
+
+**Qwen — 47 non-resolved:**
+- **20 unresolved (capability)** — patch applied, tests ran, fix was wrong/
+  incomplete. The genuine model ceiling; only B2 (memory)/a better model/pass@k
+  moves this.
+- **15 preds.json corruption (HARNESS BUG — recoverable!)** — the model produced
+  a *clean, valid diff* (present in `info.submission` in the trajectory), but
+  mini-swe-agent's patch extraction wrote **garbage into `preds.json`** — a
+  human-readable "=== Final Patch Summary ===", or raw file contents, instead of
+  the diff. `git apply` sees non-diff text → "unrecognized input" → scored as a
+  failure that is **not the model's fault**. The `"No patch.txt found, using git
+  diff"` class of bug, at scale. **Rebuild `preds.json` from the trajectories'
+  `info.submission` and re-score → recovers up to 15 instances** (Qwen's true raw
+  rate is therefore meaningfully higher than 62.4%, plausibly ~70-74%).
+- **1 patch-applied-but-test-errored** (`django-12304`: patch introduced a
+  Py-version-incompatible `boundary=` enum kwarg → import crash). Borderline
+  capability.
+- **11 empty** (8 RepeatedFormatError, 2 empty-Submitted, 1 LimitsExceeded) —
+  edge cases; Qwen otherwise submits cleanly (125/125 generation-Submitted).
+
+**Gemma4 — 78 non-resolved:**
+- **32 unresolved (capability)** — model ceiling, as above.
+- **27 empty — RepeatedFormatError (the dominant loss)** — Gemma4 rambles (leaks
+  its `<|channel>thought` reasoning tokens), can't emit a clean tool call within
+  `max_consecutive_format_errors`, and gives up with no patch. Fixes: (a) a
+  **vLLM `--reasoning-parser`** for its channel format so the thinking is stripped
+  and the tool call parses — the clean fix, serving-side; (b) **raise `MAX_TOKENS`**
+  (16384) so it can finish rambling and still reach the tool call — a real but
+  imperfect lever (trades against the slowness/hang the cap prevents).
+- **9 LimitsExceeded** (250-step cap) + **7 ContextWindowExceeded** — its
+  verbosity: long rambling trajectories hit step/context limits. A reasoning
+  parser shrinks trajectories (helps both); trajectory summarization (B2) helps
+  context; raising the step cap rarely helps an unproductive loop.
+- **3 other** (2 apply-fail, 1 empty-Submitted).
+
+**Fix priority:** (1) the `preds.json` rebuild is the highest-value, near-free
+fix — recovers ~15 real Qwen wins with no re-generation; (2) a Gemma4 reasoning
+parser is the biggest Gemma4 lever; (3) the capability misses (Qwen 20, Gemma4
+32) are the honest ceiling and the target of the memory (B2) contribution.
+
 ### First scored SWE-Bench Verified B1 result on Tillicum — Aug 9 2026
 
 `run_qwen_20_216375`: full-weights `Qwen/Qwen3.6-35B-A3B` (BF16, native

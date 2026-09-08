@@ -14,7 +14,7 @@ so every non-resolved instance gets a *reason*, not just a bucket. Two headline
 rates are reported: raw (resolved / all submitted) and "fair" (resolved / the
 instances that actually applied + ran tests — i.e. excluding empty patches and
 patches that never applied, which are infra/harness losses, not the model
-getting the fix wrong).
+getting the fix wrong). 
 
 Usage:
   python scripts/analyze_eval.py --run-id run_qwen_100 [--md report_section.md]
