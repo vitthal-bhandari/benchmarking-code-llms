@@ -597,3 +597,89 @@ First-instance validation gate: confirm `--fakeroot` + `--overlay` actually
 apply the patch and run tests on Klone's apptainer (the one unknown). If
 `run_qwen_20_216375` reproduces ~10/20, the path is trusted; scale to 100, then
 `run_qwen_temp1_b_222103` (temp=1.0) and the 9B model.
+
+---
+
+## Phase B2 — Memory management study (design, Sep 20 2026)
+
+Pivot from the B1 baseline (done: 3-model 125-instance comparison) to the actual
+contribution — agent memory management — using the **ACM paper** (Agentic Context
+Management, arXiv:2607.23809) as the reference point in the design space.
+
+### Reference-artifact situation (decided)
+ACM open-sourced **BrowseComp-Plus only**: method code (`src/history.py`,
+`runner.py`, `prompts.py`), rollouts (`react/` + `memtool/` modes), and 3
+distilled Qwen3.5-9B checkpoints. **Nothing SWE-Bench** — no code, rollouts, or
+model — so their SWE-Bench number is *not independently reproducible*. Decision:
+don't chase their number; **reimplement the mechanism on our own SWE-Bench
+harness** and study it. Skipping analysis of the released BCP rollouts (browsing,
+not code — low transfer to our question). Email authors for SWE-Bench artifacts
+in parallel (advisor cc), non-blocking.
+
+### The mechanism vs. the method (key distinction)
+- **Mechanism (scaffold, no training):** two agent tools — `manage_context`
+  (parameterless; compresses everything since the last call, a *separate
+  summarizer LLM* writes a `<memory>` summary tagged `[summary_id]`, originals
+  archived to disk) and `query_memory` (retrieve an archived summary's originals
+  by id) — plus `[CURRENT CONTEXT TOKEN: N]` injected after each tool result so
+  the agent *self-triggers*. Toggled by `use_memory_tools`. Runs on any model.
+- **Method (the ACM contribution):** OPD distillation that teaches the model to
+  use the scaffold well. Their thesis: base models self-manage context poorly;
+  training fixes it. **A3 (untrained scaffold) = ACM's own stage-1 baseline**, so
+  our A3→A4 delta reproduces exactly the contribution ACM claims.
+
+### Critical data finding — SWE-Bench Verified is NOT naturally long-horizon
+Peak-context distribution over the 99-run (approx, chars/4 of full message list):
+**median ~23k tokens, p90 ~79k, max ~203k.** A 100k cap bites only **6/99**; 64k
+bites 12/99; **32k bites 30/99**. And the longest-context instances are almost
+all the 250-step *loopers* (`LimitsExceeded`, ~502 msgs) — i.e. context pressure
+here is largely loop-pathology, not genuine long-horizon work.
+**Implication:** memory management has ~nothing to do at native 262k. Any study
+here is a **controlled context-budget** study (we impose the pressure), not a
+natural one. **OPEN FORK for advisor:** controlled-budget on SWE-Bench (frame as
+budget-sensitivity) vs. a naturally-long-horizon coding setting. If SWE-Bench:
+cap at **32k**, ideally sweep **16k / 32k / 64k** — the degradation curve is the
+result, not any single point.
+
+### Experimental arms (identical except the memory policy)
+- **A1 — ReAct, no memory** (`policy=none`): dies at the cap → cost of doing nothing.
+- **A2 — summarize-on-threshold** (`policy=summarize`): lossy, external trigger → naive memory.
+- **A3 — ACM scaffold, untrained base model** (`policy=acm`): agent-native trigger
+  + lossless archive + `query_memory`, prompt-driven. = ACM's pre-training baseline.
+- **A4 — ACM trained** (Phase 2): the "does training help" delta.
+A1–A3 share the same base model → single swapped variable (publishable). Start A1–A3.
+
+### Training feasibility (constraint)
+ACM's teacher is **Qwen3.5-397B-A17B** — cannot serve on one H200, so full OPD is
+**infeasible on Tillicum**. A4 options: (a) their released distilled 9B as-is
+(browsing-trained → uncertain transfer, itself a finding); (b) lighter
+self-distillation with a servable teacher; (c) skip training, report
+mechanism-only. Phase 1 = harness-only (A1–A3, inference only). Decide A4 later.
+
+### Metrics (collect all — efficiency is half the research question)
+Resolve rate (via Apptainer scoring, unchanged) **and** efficiency: tokens spent
+on memory ops, archive size vs. live-context tokens, # compress/retrieve edits,
+edit-count↔success correlation (test "more edits ↓ success" hypothesis).
+
+### Implementation (surface)
+ACM memory logic is small/portable (`history.py` ~150 lines + the manage_context
+handler). Friction is mini-swe-agent: bash-only, owns its own history, resists
+extra tools + mid-run message rewriting. **Leaning: thin custom ReAct loop we
+control**, where the memory policy is a pluggable module shared by A1/A2/A3 —
+cleaner than grafting onto mini-swe-agent. Cap enforced by vLLM
+`--max-model-len` (hard) + a harness compression threshold below it (headroom for
+the response). All arms = serve+drive inference jobs on the existing
+`serve_and_run` pattern + new `MEMORY_POLICY` knob; scoring stays Apptainer/Klone.
+
+### Budget
+A 100-instance arm ≈ 12–16 GPU-hrs (like B1). 3 arms × 3 caps ≈ 100–150 GPU-hrs —
+eats most of the 250 budget. So Phase 1: **~50-instance cap-sensitive subset × 3
+arms × 1–2 caps** first; expand on signal. Or run the study on a smaller/faster
+model (the mechanism question isn't model-specific).
+
+### Phasing
+1. Decide the framing fork with advisor (SWE-Bench-capped vs. naturally-long).
+2. Build the thin loop + pluggable policy (`none`, `summarize` first — no ACM code).
+3. Add the ACM policy (port `history.py` + manage_context/query_memory + token hint).
+4. Run A1–A3 on the cap-sensitive subset at 32k; measure resolve + efficiency.
+5. A4 (training/transfer) only if the mechanism shows promise.
