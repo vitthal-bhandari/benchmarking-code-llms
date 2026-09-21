@@ -241,12 +241,29 @@ echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS 
   export MSWEA_COST_TRACKING='ignore_errors'
   # Same-node localhost traffic — no proxy bypass needed, but harmless if set.
   export NO_PROXY="localhost,127.0.0.1"; export no_proxy="$NO_PROXY"
-  LITELLM_MODEL_REGISTRY_PATH=configs/registry.json mini-extra swebench \
-    -m "$AGENT_MODEL_NAME" \
-    -c swebench.yaml -c "$API_OVERRIDE" \
-    --subset verified --split test --slice "$SLICE" \
-    --environment-class singularity --workers "$WORKERS" \
-    --output "$OUTPUT_DIR/"
+  if [ -n "${MEMORY_POLICY:-}" ]; then
+    # B2 memory arm: drive via our MemoryAgent instead of stock mini-swe-agent.
+    # The context cap is enforced by the vLLM server, so pass MAX_MODEL_LEN=32000
+    # in --export for A1/A2/A3. MEMORY_POLICY = none | summarize | acm.
+    LITELLM_MODEL_REGISTRY_PATH=configs/registry.json \
+    python scripts/run_memory_swebench.py \
+      -m "$AGENT_MODEL_NAME" \
+      -c swebench.yaml -c "$API_OVERRIDE" \
+      --subset verified --split test --slice "$SLICE" \
+      --environment-class singularity --workers "$WORKERS" \
+      --memory-policy "$MEMORY_POLICY" \
+      --context-cap "${CONTEXT_CAP:-32000}" \
+      --summarize-at "${SUMMARIZE_AT:-28000}" \
+      --keep-last-k "${KEEP_LAST_K:-6}" \
+      --output "$OUTPUT_DIR"
+  else
+    LITELLM_MODEL_REGISTRY_PATH=configs/registry.json mini-extra swebench \
+      -m "$AGENT_MODEL_NAME" \
+      -c swebench.yaml -c "$API_OVERRIDE" \
+      --subset verified --split test --slice "$SLICE" \
+      --environment-class singularity --workers "$WORKERS" \
+      --output "$OUTPUT_DIR/"
+  fi
 )
 
 echo ""
