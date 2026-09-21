@@ -86,6 +86,18 @@ sure your work so far is captured before you do. Do not compress away the exact
 edit you are mid-way through."""
 
 
+# ── Forced-compression nudge (A3), adapted from ACM's BCP_COMPRESS_PROMPT ──
+# ACM injects this at 95% of the context window (runner.py:930) so the agent
+# doesn't just die when it fails to compress voluntarily. It's still the *model*
+# that executes the compression — we only nudge; we never compress for it in A3.
+FORCE_COMPRESS_PROMPT = (
+    "WARNING: your context is nearly full and the task is not finished. You MUST "
+    "immediately issue `manage_context` (as the entire command) to compress "
+    "everything since your last manage_context call and free space. Do NOT submit "
+    "yet. Run `manage_context` now, then continue working."
+)
+
+
 def _memory_marker(n: int) -> str:
     return f"\n[CURRENT CONTEXT TOKEN: {n}]"
 
@@ -142,10 +154,12 @@ class MemoryAgent(DefaultAgent):
             self.logger.warning(f"summarizer call failed: {e}")
             return f"<memory>\n(summary unavailable: {e})\n</memory>"
 
-    def _compress_range(self, start: int, end: int) -> dict | None:
+    def _compress_range(self, start: int, end: int, trigger: str = "harness") -> dict | None:
         """Replace messages[start:end] with one summary message; archive originals.
         `end` must sit on a turn boundary (an assistant index) so no tool_call/tool
-        pair is split. Returns an edit record, or None if nothing to compress."""
+        pair is split. `trigger` records WHY this edit happened (harness / voluntary
+        / forced) — the key metric for the untrained-ACM question. Returns an edit
+        record, or None if nothing to compress."""
         if end <= start:
             return None
         original = self.messages[start:end]
@@ -162,7 +176,8 @@ class MemoryAgent(DefaultAgent):
         self.archive.append({"summary_id": sid, "messages": original})
         self.n_edits += 1
         edit = {
-            "type": "summarize", "span": [start, end], "tokens_before": before, "tokens_after": after,
+            "type": "summarize", "trigger": trigger, "span": [start, end],
+            "tokens_before": before, "tokens_after": after,
             "summary_tokens": self._count_tokens([summary_msg]), "summary_id": sid, "n_compressed": len(original),
         }
         summary_msg["extra"]["tokens_before"] = before
@@ -180,12 +195,17 @@ class MemoryAgent(DefaultAgent):
             return -1
         return starts[-self.keep_last_k]  # keep the last K turns intact
 
-    # ── A2 hook: harness-triggered compression before each model call ────
+    # ── pre-call hooks: A2 harness compression, A3 forced-compression nudge ──
     def query(self) -> dict:
         if self.memory_policy == "summarize" and self._count_tokens(self.messages) >= self.summarize_at:
             end = self._compressible_tail_boundary(since=2)
             if end > 2:
-                self._compress_range(2, end)
+                self._compress_range(2, end, trigger="harness")
+        elif self.memory_policy == "acm" and self._count_tokens(self.messages) >= int(self.context_cap * 0.95):
+            # ACM's 95% forced nudge — inject once (guard against re-injecting every step)
+            if not (self.messages and self.messages[-1].get("extra", {}).get("force_compress")):
+                self.add_messages({"role": "user", "content": FORCE_COMPRESS_PROMPT,
+                                   "extra": {"force_compress": True}})
         return super().query()
 
     # ── A3 hook: intercept manage_context / query_memory bash commands ───
@@ -212,7 +232,9 @@ class MemoryAgent(DefaultAgent):
         starts = self._turn_start_indices()
         end = starts[-1] if starts else len(self.messages)  # the manage_context turn itself
         end = max(end, self._last_mc_end)
-        edit = self._compress_range(self._last_mc_end, end)
+        # voluntary unless the model was nudged by the 95% forced prompt this turn
+        forced = any(m.get("extra", {}).get("force_compress") for m in self.messages[-3:])
+        edit = self._compress_range(self._last_mc_end, end, trigger="forced" if forced else "voluntary")
         if edit is None:
             return {"output": "manage_context: nothing new to compress yet." + _memory_marker(self._count_tokens(self.messages)),
                     "returncode": 0}

@@ -245,11 +245,13 @@ echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS 
     # B2 memory arm: drive via our MemoryAgent instead of stock mini-swe-agent.
     # The context cap is enforced by the vLLM server, so pass MAX_MODEL_LEN=32000
     # in --export for A1/A2/A3. MEMORY_POLICY = none | summarize | acm.
+    MEM_ID_ARGS=()
+    [ -n "${INSTANCE_IDS:-}" ] && MEM_ID_ARGS=(--instance-ids "$INSTANCE_IDS")
     LITELLM_MODEL_REGISTRY_PATH=configs/registry.json \
     python scripts/run_memory_swebench.py \
       -m "$AGENT_MODEL_NAME" \
       -c swebench.yaml -c "$API_OVERRIDE" \
-      --subset verified --split test --slice "$SLICE" \
+      --subset verified --split test --slice "$SLICE" "${MEM_ID_ARGS[@]}" \
       --environment-class singularity --workers "$WORKERS" \
       --memory-policy "$MEMORY_POLICY" \
       --context-cap "${CONTEXT_CAP:-32000}" \
