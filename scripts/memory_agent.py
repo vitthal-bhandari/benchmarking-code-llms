@@ -138,9 +138,34 @@ class MemoryAgent(DefaultAgent):
         self._last_mc_end = 2             # A3: start of the next compressible range
 
     # ── token accounting ────────────────────────────────────────────────
+    # ACM's finding (client.py LocalClient.count_tokens): count with the MODEL's
+    # own tokenizer via apply_chat_template — litellm.token_counter uses a generic
+    # tokenizer and undercounts Qwen by ~15%, which is what broke A3. Cascade:
+    #   1) local Qwen tokenizer (apply_chat_template)  — exact, matches vLLM
+    #   2) the serving vLLM's /tokenize endpoint        — exact, no local deps
+    #   3) litellm.token_counter                         — undercounts
+    #   4) chars/4
+    def _get_tokenizer(self):
+        if getattr(self, "_tok", "unset") == "unset":
+            try:
+                from transformers import AutoTokenizer
+                self._tok = AutoTokenizer.from_pretrained(self._served_model)
+            except Exception as e:
+                self.logger.warning(f"local tokenizer unavailable ({e}); using /tokenize or litellm")
+                self._tok = None
+        return self._tok
+
     def _count_tokens(self, messages: list[dict]) -> int:
         slim = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in messages]
-        # 1) exact: ask the serving vLLM to tokenize with its own chat template
+        tok = self._get_tokenizer()
+        if tok is not None:
+            try:
+                ids = tok.apply_chat_template(slim, add_generation_prompt=True, tokenize=True)
+                if ids and isinstance(ids[0], list):
+                    ids = ids[0]
+                return len(ids)
+            except Exception:
+                pass
         if self._tokenize_url:
             try:
                 r = requests.post(
@@ -152,7 +177,6 @@ class MemoryAgent(DefaultAgent):
                     return int(r.json()["count"])
             except Exception:
                 pass
-        # 2) fallback: litellm (undercounts vLLM), then chars/4
         try:
             return int(litellm.token_counter(model=self.model.config.model_name, messages=slim))
         except Exception:
