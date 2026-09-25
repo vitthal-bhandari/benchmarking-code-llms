@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 import litellm
+import requests
 
 from minisweagent.agents.default import DefaultAgent
 
@@ -112,6 +113,7 @@ class MemoryAgent(DefaultAgent):
         context_cap: int = 32000,
         summarize_at: int = 28000,
         keep_last_k: int = 6,
+        force_frac: float = 0.85,
         **kwargs,
     ):
         super().__init__(model, env, **kwargs)  # memory_* are captured here, not passed to AgentConfig
@@ -119,7 +121,16 @@ class MemoryAgent(DefaultAgent):
         self.context_cap = context_cap
         self.summarize_at = summarize_at
         self.keep_last_k = keep_last_k
+        self.force_frac = force_frac  # A3 forced-nudge threshold as a fraction of the cap
         self._task = ""
+        # Count tokens with the SAME tokenizer vLLM uses to enforce the cap
+        # (litellm.token_counter undercounts it by ~15%, which made A3's forced
+        # nudge unreachable). Fall back to litellm -> chars/4 if the endpoint is
+        # unavailable.
+        api_base = (getattr(model.config, "model_kwargs", {}) or {}).get("api_base", "")
+        self._tokenize_url = (api_base.rstrip("/").removesuffix("/v1") + "/tokenize") if api_base else None
+        mn = model.config.model_name
+        self._served_model = mn.split("/", 1)[1] if mn.startswith("hosted_vllm/") else mn
         self.mem_steps: list[dict] = []   # per-turn: {step, ctx_tokens, n_messages, edit}
         self.archive: list[dict] = []     # [{summary_id, messages:[...]}]
         self.n_edits = 0
@@ -127,9 +138,46 @@ class MemoryAgent(DefaultAgent):
         self._last_mc_end = 2             # A3: start of the next compressible range
 
     # ── token accounting ────────────────────────────────────────────────
+    # ACM's finding (client.py LocalClient.count_tokens): count with the MODEL's
+    # own tokenizer via apply_chat_template — litellm.token_counter uses a generic
+    # tokenizer and undercounts Qwen by ~15%, which is what broke A3. Cascade:
+    #   1) local Qwen tokenizer (apply_chat_template)  — exact, matches vLLM
+    #   2) the serving vLLM's /tokenize endpoint        — exact, no local deps
+    #   3) litellm.token_counter                         — undercounts
+    #   4) chars/4
+    def _get_tokenizer(self):
+        if getattr(self, "_tok", "unset") == "unset":
+            try:
+                from transformers import AutoTokenizer
+                self._tok = AutoTokenizer.from_pretrained(self._served_model)
+            except Exception as e:
+                self.logger.warning(f"local tokenizer unavailable ({e}); using /tokenize or litellm")
+                self._tok = None
+        return self._tok
+
     def _count_tokens(self, messages: list[dict]) -> int:
+        slim = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in messages]
+        tok = self._get_tokenizer()
+        if tok is not None:
+            try:
+                ids = tok.apply_chat_template(slim, add_generation_prompt=True, tokenize=True)
+                if ids and isinstance(ids[0], list):
+                    ids = ids[0]
+                return len(ids)
+            except Exception:
+                pass
+        if self._tokenize_url:
+            try:
+                r = requests.post(
+                    self._tokenize_url,
+                    json={"model": self._served_model, "messages": slim, "add_generation_prompt": True},
+                    timeout=20,
+                )
+                if r.ok:
+                    return int(r.json()["count"])
+            except Exception:
+                pass
         try:
-            slim = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in messages]
             return int(litellm.token_counter(model=self.model.config.model_name, messages=slim))
         except Exception:
             return sum(len(str(m.get("content", ""))) for m in messages) // 4
@@ -201,8 +249,10 @@ class MemoryAgent(DefaultAgent):
             end = self._compressible_tail_boundary(since=2)
             if end > 2:
                 self._compress_range(2, end, trigger="harness")
-        elif self.memory_policy == "acm" and self._count_tokens(self.messages) >= int(self.context_cap * 0.95):
-            # ACM's 95% forced nudge — inject once (guard against re-injecting every step)
+        elif self.memory_policy == "acm" and self._count_tokens(self.messages) >= int(self.context_cap * self.force_frac):
+            # ACM-style forced nudge — fires at force_frac of the cap (0.85 by
+            # default: below 1.0 so the prompt + tools + the model's response
+            # still fit under max_model_len). Inject once per crossing.
             if not (self.messages and self.messages[-1].get("extra", {}).get("force_compress")):
                 self.add_messages({"role": "user", "content": FORCE_COMPRESS_PROMPT,
                                    "extra": {"force_compress": True}})
