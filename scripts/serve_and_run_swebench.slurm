@@ -229,6 +229,15 @@ model:
     api_base: http://localhost:${PORT}/v1
 EOF
 [ -n "${TEMPERATURE:-}" ] && echo "    temperature: ${TEMPERATURE}" >> "$API_OVERRIDE"
+# Full sampling control (Qwen3.6 is tuned for temp>0; greedy causes repetition
+# loops). Qwen's coding preset: TEMPERATURE=0.6 TOP_P=0.95 TOP_K=20. Add SEED for
+# reproducibility so A1/A2/A3 differences are attributable to the memory policy,
+# not sampling noise. (litellm passes temp/top_p/seed/presence_penalty; top_k is
+# vLLM-specific and may be dropped under drop_params — harmless.)
+[ -n "${TOP_P:-}" ] && echo "    top_p: ${TOP_P}" >> "$API_OVERRIDE"
+[ -n "${TOP_K:-}" ] && echo "    top_k: ${TOP_K}" >> "$API_OVERRIDE"
+[ -n "${SEED:-}" ] && echo "    seed: ${SEED}" >> "$API_OVERRIDE"
+[ -n "${PRESENCE_PENALTY:-}" ] && echo "    presence_penalty: ${PRESENCE_PENALTY}" >> "$API_OVERRIDE"
 # MAX_TOKENS caps output per agent step. Without it, a model that rambles (e.g.
 # Gemma4's reasoning-tag runaway) generates toward its native max (262K), so a
 # single step runs past litellm's 600s client timeout and the run hangs. A cap
