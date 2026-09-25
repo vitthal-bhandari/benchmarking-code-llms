@@ -112,7 +112,7 @@ class MemoryAgent(DefaultAgent):
         memory_policy: str = "none",
         context_cap: int = 32000,
         summarize_at: int = 28000,
-        keep_last_k: int = 6,
+        keep_last_k: int = 3,
         force_frac: float = 0.85,
         **kwargs,
     ):
@@ -237,11 +237,23 @@ class MemoryAgent(DefaultAgent):
         return edit
 
     def _compressible_tail_boundary(self, since: int) -> int:
-        """Largest turn-aligned end index that keeps the last keep_last_k turns."""
+        """Turn-aligned boundary: compress messages[since:boundary], keep the tail.
+        Keeps at most keep_last_k recent turns, and further caps the protected
+        tail to ~0.55*cap so anchors + summary + tail fit under the context limit
+        even when recent observations are large (the bug that made A2 die at a
+        tight cap despite compressing)."""
         starts = [i for i in self._turn_start_indices() if i >= since]
-        if len(starts) <= self.keep_last_k:
+        if len(starts) <= 1:
             return -1
-        return starts[-self.keep_last_k]  # keep the last K turns intact
+        budget = int(self.context_cap * 0.55)
+        boundary = starts[-1]  # keep at least the most recent turn
+        for s in reversed(starts):
+            if self._count_tokens(self.messages[s:]) > budget:
+                break
+            boundary = s
+        if len(starts) >= self.keep_last_k:  # never keep MORE than keep_last_k turns
+            boundary = max(boundary, starts[-self.keep_last_k])
+        return boundary if boundary > since else -1
 
     # ── pre-call hooks: A2 harness compression, A3 forced-compression nudge ──
     def query(self) -> dict:
@@ -276,6 +288,14 @@ class MemoryAgent(DefaultAgent):
                 outputs.append(out)
         return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
 
+    def _obs(self, text: str, returncode: int = 0) -> dict:
+        """Synthetic observation matching env.execute's shape. Must carry an
+        exception_info key: swebench.yaml's observation_template does
+        `{% if output.exception_info %}` under StrictUndefined, which raises
+        UndefinedError if the key is absent."""
+        return {"output": text + _memory_marker(self._count_tokens(self.messages)),
+                "returncode": returncode, "exception_info": None}
+
     def _handle_manage_context(self) -> dict:
         # compress everything since the last manage_context up to (not incl.) the
         # message that issued this command (which is the current last assistant turn)
@@ -286,14 +306,10 @@ class MemoryAgent(DefaultAgent):
         forced = any(m.get("extra", {}).get("force_compress") for m in self.messages[-3:])
         edit = self._compress_range(self._last_mc_end, end, trigger="forced" if forced else "voluntary")
         if edit is None:
-            return {"output": "manage_context: nothing new to compress yet." + _memory_marker(self._count_tokens(self.messages)),
-                    "returncode": 0}
+            return self._obs("manage_context: nothing new to compress yet.")
         freed = edit["tokens_before"] - edit["tokens_after"]
-        return {
-            "output": f"[summary_id: {edit['summary_id']}] compressed {edit['n_compressed']} messages, "
-                      f"freed ~{freed} tokens. Continue working." + _memory_marker(self._count_tokens(self.messages)),
-            "returncode": 0,
-        }
+        return self._obs(f"[summary_id: {edit['summary_id']}] compressed {edit['n_compressed']} messages, "
+                         f"freed ~{freed} tokens. Continue working.")
 
     def _handle_query_memory(self, cmd: str) -> dict:
         parts = cmd.split()
@@ -305,12 +321,9 @@ class MemoryAgent(DefaultAgent):
                 continue
         entry = next((a for a in self.archive if a["summary_id"] == sid), None)
         if entry is None:
-            return {"output": f"query_memory: no summary_id={sid}." + _memory_marker(self._count_tokens(self.messages)),
-                    "returncode": 1}
+            return self._obs(f"query_memory: no summary_id={sid}.", returncode=1)
         dump = "\n\n".join(f"[{m.get('role')}]\n{str(m.get('content',''))}" for m in entry["messages"])
-        return {"output": f"Retrieved original messages for summary_id={sid}:\n{dump}"
-                          + _memory_marker(self._count_tokens(self.messages)),
-                "returncode": 0}
+        return self._obs(f"Retrieved original messages for summary_id={sid}:\n{dump}")
 
     # ── per-turn telemetry ──────────────────────────────────────────────
     def step(self) -> list[dict]:
