@@ -245,7 +245,11 @@ class MemoryAgent(DefaultAgent):
         starts = [i for i in self._turn_start_indices() if i >= since]
         if len(starts) <= 1:
             return -1
-        budget = int(self.context_cap * 0.55)
+        # Reserve room for what we DON'T compress: the anchors (system+task, kept
+        # at [:2]), the summary we're about to write (<=4096), and the model's
+        # next response (~2000). The protected tail must fit in what's left.
+        anchors = self._count_tokens(self.messages[:2])
+        budget = max(2000, self.context_cap - anchors - 6000)
         boundary = starts[-1]  # keep at least the most recent turn
         for s in reversed(starts):
             if self._count_tokens(self.messages[s:]) > budget:
