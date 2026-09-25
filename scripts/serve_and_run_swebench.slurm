@@ -45,7 +45,10 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
 # --- server config -----------------------------------------------------------
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3.6-35B-A3B}"
-PORT="${PORT:-8000}"
+# Derive a job-unique port so parallel jobs that Slurm packs onto the SAME
+# H200 node (these boxes have several GPUs) don't collide on one port. The
+# api_override below reuses $PORT, so server and driver stay in sync.
+PORT="${PORT:-$(( 10000 + ${SLURM_JOB_ID:-$$} % 40000 ))}"
 # Which venv serves the model. Default .venv is the vLLM-0.21 stack pinned for
 # Qwen3.6. Newer 2026 models (Gemma4's per-layer head_dim, North-Mini-Code's
 # hybrid MoE) need model code that 0.21 predates — point them at a separate
