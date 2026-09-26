@@ -36,6 +36,7 @@ import litellm
 import requests
 
 from minisweagent.agents.default import DefaultAgent
+from minisweagent.models.utils.actions_toolcall import BASH_TOOL
 
 # ── Summarizer prompt (SWE-bench adaptation of ACM's _SUMMARY_INSTRUCTION_NOQUERY) ──
 SUMMARIZER_SYSTEM = (
@@ -136,6 +137,7 @@ class MemoryAgent(DefaultAgent):
         self.n_edits = 0
         self._pending_edit: dict | None = None
         self._last_mc_end = 2             # A3: start of the next compressible range
+        self._calibrated = False          # log token-count vs vLLM prompt_tokens once
 
     # ── token accounting ────────────────────────────────────────────────
     # ACM's finding (client.py LocalClient.count_tokens): count with the MODEL's
@@ -156,11 +158,17 @@ class MemoryAgent(DefaultAgent):
         return self._tok
 
     def _count_tokens(self, messages: list[dict]) -> int:
-        slim = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in messages]
+        # Count what the model ACTUALLY sends: full messages (minus our internal
+        # "extra" field) INCLUDING tool_calls, plus the bash tool schema. Counting
+        # only {role, content} strips every assistant turn's tool_call and omits
+        # the tools, undercounting vLLM by ~5k — which silently defeats the
+        # thresholds (compression never fires before vLLM rejects the prompt).
+        api_msgs = [{k: v for k, v in m.items() if k != "extra"} for m in messages]
         tok = self._get_tokenizer()
         if tok is not None:
             try:
-                ids = tok.apply_chat_template(slim, add_generation_prompt=True, tokenize=True)
+                ids = tok.apply_chat_template(api_msgs, tools=[BASH_TOOL],
+                                              add_generation_prompt=True, tokenize=True)
                 if ids and isinstance(ids[0], list):
                     ids = ids[0]
                 return len(ids)
@@ -170,7 +178,8 @@ class MemoryAgent(DefaultAgent):
             try:
                 r = requests.post(
                     self._tokenize_url,
-                    json={"model": self._served_model, "messages": slim, "add_generation_prompt": True},
+                    json={"model": self._served_model, "messages": api_msgs,
+                          "tools": [BASH_TOOL], "add_generation_prompt": True},
                     timeout=20,
                 )
                 if r.ok:
@@ -178,7 +187,7 @@ class MemoryAgent(DefaultAgent):
             except Exception:
                 pass
         try:
-            return int(litellm.token_counter(model=self.model.config.model_name, messages=slim))
+            return int(litellm.token_counter(model=self.model.config.model_name, messages=api_msgs))
         except Exception:
             return sum(len(str(m.get("content", ""))) for m in messages) // 4
 
@@ -272,7 +281,16 @@ class MemoryAgent(DefaultAgent):
             if not (self.messages and self.messages[-1].get("extra", {}).get("force_compress")):
                 self.add_messages({"role": "user", "content": FORCE_COMPRESS_PROMPT,
                                    "extra": {"force_compress": True}})
-        return super().query()
+        # one-time calibration: does our token count match vLLM's real prompt?
+        pre_count = self._count_tokens(self.messages) if not self._calibrated else None
+        msg = super().query()
+        if pre_count is not None:
+            actual = ((msg.get("extra", {}).get("response") or {}).get("usage") or {}).get("prompt_tokens")
+            if actual:
+                self.logger.warning(f"[token-calib] my_count={pre_count} vLLM_prompt_tokens={actual} "
+                                    f"ratio={actual/max(1,pre_count):.3f}")
+            self._calibrated = True
+        return msg
 
     # ── A3 hook: intercept manage_context / query_memory bash commands ───
     def execute_actions(self, message: dict) -> list[dict]:
