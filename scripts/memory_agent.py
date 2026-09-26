@@ -36,6 +36,7 @@ import litellm
 import requests
 
 from minisweagent.agents.default import DefaultAgent
+from minisweagent.models.utils.actions_toolcall import BASH_TOOL
 
 # ── Summarizer prompt (SWE-bench adaptation of ACM's _SUMMARY_INSTRUCTION_NOQUERY) ──
 SUMMARIZER_SYSTEM = (
@@ -113,7 +114,7 @@ class MemoryAgent(DefaultAgent):
         context_cap: int = 32000,
         summarize_at: int = 28000,
         keep_last_k: int = 3,
-        force_frac: float = 0.85,
+        force_frac: float = 0.95,   # ACM's threshold (runner.py:930)
         **kwargs,
     ):
         super().__init__(model, env, **kwargs)  # memory_* are captured here, not passed to AgentConfig
@@ -131,11 +132,17 @@ class MemoryAgent(DefaultAgent):
         self._tokenize_url = (api_base.rstrip("/").removesuffix("/v1") + "/tokenize") if api_base else None
         mn = model.config.model_name
         self._served_model = mn.split("/", 1)[1] if mn.startswith("hosted_vllm/") else mn
+        # ACM (runner.py:850) projects the NEXT prompt size as count + the output
+        # reservation vLLM sets aside, so the trigger compares like-for-like
+        # against the cap. Without this, a threshold on the raw count fires only
+        # AFTER vLLM has already rejected the prompt (cap - max_tokens).
+        self._max_tokens_reserve = int((getattr(model.config, "model_kwargs", {}) or {}).get("max_tokens") or 4096)
         self.mem_steps: list[dict] = []   # per-turn: {step, ctx_tokens, n_messages, edit}
         self.archive: list[dict] = []     # [{summary_id, messages:[...]}]
         self.n_edits = 0
         self._pending_edit: dict | None = None
         self._last_mc_end = 2             # A3: start of the next compressible range
+        self._calibrated = False          # log token-count vs vLLM prompt_tokens once
 
     # ── token accounting ────────────────────────────────────────────────
     # ACM's finding (client.py LocalClient.count_tokens): count with the MODEL's
@@ -156,11 +163,17 @@ class MemoryAgent(DefaultAgent):
         return self._tok
 
     def _count_tokens(self, messages: list[dict]) -> int:
-        slim = [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in messages]
+        # Count what the model ACTUALLY sends: full messages (minus our internal
+        # "extra" field) INCLUDING tool_calls, plus the bash tool schema. Counting
+        # only {role, content} strips every assistant turn's tool_call and omits
+        # the tools, undercounting vLLM by ~5k — which silently defeats the
+        # thresholds (compression never fires before vLLM rejects the prompt).
+        api_msgs = [{k: v for k, v in m.items() if k != "extra"} for m in messages]
         tok = self._get_tokenizer()
         if tok is not None:
             try:
-                ids = tok.apply_chat_template(slim, add_generation_prompt=True, tokenize=True)
+                ids = tok.apply_chat_template(api_msgs, tools=[BASH_TOOL],
+                                              add_generation_prompt=True, tokenize=True)
                 if ids and isinstance(ids[0], list):
                     ids = ids[0]
                 return len(ids)
@@ -170,7 +183,8 @@ class MemoryAgent(DefaultAgent):
             try:
                 r = requests.post(
                     self._tokenize_url,
-                    json={"model": self._served_model, "messages": slim, "add_generation_prompt": True},
+                    json={"model": self._served_model, "messages": api_msgs,
+                          "tools": [BASH_TOOL], "add_generation_prompt": True},
                     timeout=20,
                 )
                 if r.ok:
@@ -178,9 +192,14 @@ class MemoryAgent(DefaultAgent):
             except Exception:
                 pass
         try:
-            return int(litellm.token_counter(model=self.model.config.model_name, messages=slim))
+            return int(litellm.token_counter(model=self.model.config.model_name, messages=api_msgs))
         except Exception:
             return sum(len(str(m.get("content", ""))) for m in messages) // 4
+
+    def _projected(self, messages: list[dict]) -> int:
+        """count + output reservation = a conservative upper bound on the next
+        prompt size, comparable directly against the cap (ACM's N)."""
+        return self._count_tokens(messages) + self._max_tokens_reserve
 
     def _turn_start_indices(self) -> list[int]:
         return [i for i, m in enumerate(self.messages) if m.get("role") == "assistant"]
@@ -261,18 +280,28 @@ class MemoryAgent(DefaultAgent):
 
     # ── pre-call hooks: A2 harness compression, A3 forced-compression nudge ──
     def query(self) -> dict:
-        if self.memory_policy == "summarize" and self._count_tokens(self.messages) >= self.summarize_at:
+        if self.memory_policy == "summarize" and self._projected(self.messages) >= self.summarize_at:
             end = self._compressible_tail_boundary(since=2)
             if end > 2:
                 self._compress_range(2, end, trigger="harness")
-        elif self.memory_policy == "acm" and self._count_tokens(self.messages) >= int(self.context_cap * self.force_frac):
-            # ACM-style forced nudge — fires at force_frac of the cap (0.85 by
-            # default: below 1.0 so the prompt + tools + the model's response
-            # still fit under max_model_len). Inject once per crossing.
+        elif self.memory_policy == "acm" and self._projected(self.messages) >= int(self.context_cap * self.force_frac):
+            # ACM-style forced nudge — fires at force_frac of the cap (0.95,
+            # matching ACM runner.py:930). _projected already adds the output
+            # reservation, so this compares a true upper bound on the next
+            # prompt against the cap. Inject once per crossing.
             if not (self.messages and self.messages[-1].get("extra", {}).get("force_compress")):
                 self.add_messages({"role": "user", "content": FORCE_COMPRESS_PROMPT,
                                    "extra": {"force_compress": True}})
-        return super().query()
+        # one-time calibration: does our token count match vLLM's real prompt?
+        pre_count = self._count_tokens(self.messages) if not self._calibrated else None
+        msg = super().query()
+        if pre_count is not None:
+            actual = ((msg.get("extra", {}).get("response") or {}).get("usage") or {}).get("prompt_tokens")
+            if actual:
+                self.logger.warning(f"[token-calib] my_count={pre_count} vLLM_prompt_tokens={actual} "
+                                    f"ratio={actual/max(1,pre_count):.3f}")
+            self._calibrated = True
+        return msg
 
     # ── A3 hook: intercept manage_context / query_memory bash commands ───
     def execute_actions(self, message: dict) -> list[dict]:
@@ -288,7 +317,7 @@ class MemoryAgent(DefaultAgent):
             else:
                 out = self.env.execute(action)
                 out = dict(out)
-                out["output"] = (out.get("output") or "") + _memory_marker(self._count_tokens(self.messages))
+                out["output"] = (out.get("output") or "") + _memory_marker(self._projected(self.messages))
                 outputs.append(out)
         return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
 
@@ -297,7 +326,7 @@ class MemoryAgent(DefaultAgent):
         exception_info key: swebench.yaml's observation_template does
         `{% if output.exception_info %}` under StrictUndefined, which raises
         UndefinedError if the key is absent."""
-        return {"output": text + _memory_marker(self._count_tokens(self.messages)),
+        return {"output": text + _memory_marker(self._projected(self.messages)),
                 "returncode": returncode, "exception_info": None}
 
     def _handle_manage_context(self) -> dict:
