@@ -114,7 +114,7 @@ class MemoryAgent(DefaultAgent):
         context_cap: int = 32000,
         summarize_at: int = 28000,
         keep_last_k: int = 3,
-        force_frac: float = 0.85,
+        force_frac: float = 0.95,   # ACM's threshold (runner.py:930)
         **kwargs,
     ):
         super().__init__(model, env, **kwargs)  # memory_* are captured here, not passed to AgentConfig
@@ -132,6 +132,11 @@ class MemoryAgent(DefaultAgent):
         self._tokenize_url = (api_base.rstrip("/").removesuffix("/v1") + "/tokenize") if api_base else None
         mn = model.config.model_name
         self._served_model = mn.split("/", 1)[1] if mn.startswith("hosted_vllm/") else mn
+        # ACM (runner.py:850) projects the NEXT prompt size as count + the output
+        # reservation vLLM sets aside, so the trigger compares like-for-like
+        # against the cap. Without this, a threshold on the raw count fires only
+        # AFTER vLLM has already rejected the prompt (cap - max_tokens).
+        self._max_tokens_reserve = int((getattr(model.config, "model_kwargs", {}) or {}).get("max_tokens") or 4096)
         self.mem_steps: list[dict] = []   # per-turn: {step, ctx_tokens, n_messages, edit}
         self.archive: list[dict] = []     # [{summary_id, messages:[...]}]
         self.n_edits = 0
@@ -190,6 +195,11 @@ class MemoryAgent(DefaultAgent):
             return int(litellm.token_counter(model=self.model.config.model_name, messages=api_msgs))
         except Exception:
             return sum(len(str(m.get("content", ""))) for m in messages) // 4
+
+    def _projected(self, messages: list[dict]) -> int:
+        """count + output reservation = a conservative upper bound on the next
+        prompt size, comparable directly against the cap (ACM's N)."""
+        return self._count_tokens(messages) + self._max_tokens_reserve
 
     def _turn_start_indices(self) -> list[int]:
         return [i for i, m in enumerate(self.messages) if m.get("role") == "assistant"]
@@ -270,14 +280,15 @@ class MemoryAgent(DefaultAgent):
 
     # ── pre-call hooks: A2 harness compression, A3 forced-compression nudge ──
     def query(self) -> dict:
-        if self.memory_policy == "summarize" and self._count_tokens(self.messages) >= self.summarize_at:
+        if self.memory_policy == "summarize" and self._projected(self.messages) >= self.summarize_at:
             end = self._compressible_tail_boundary(since=2)
             if end > 2:
                 self._compress_range(2, end, trigger="harness")
-        elif self.memory_policy == "acm" and self._count_tokens(self.messages) >= int(self.context_cap * self.force_frac):
-            # ACM-style forced nudge — fires at force_frac of the cap (0.85 by
-            # default: below 1.0 so the prompt + tools + the model's response
-            # still fit under max_model_len). Inject once per crossing.
+        elif self.memory_policy == "acm" and self._projected(self.messages) >= int(self.context_cap * self.force_frac):
+            # ACM-style forced nudge — fires at force_frac of the cap (0.95,
+            # matching ACM runner.py:930). _projected already adds the output
+            # reservation, so this compares a true upper bound on the next
+            # prompt against the cap. Inject once per crossing.
             if not (self.messages and self.messages[-1].get("extra", {}).get("force_compress")):
                 self.add_messages({"role": "user", "content": FORCE_COMPRESS_PROMPT,
                                    "extra": {"force_compress": True}})
@@ -306,7 +317,7 @@ class MemoryAgent(DefaultAgent):
             else:
                 out = self.env.execute(action)
                 out = dict(out)
-                out["output"] = (out.get("output") or "") + _memory_marker(self._count_tokens(self.messages))
+                out["output"] = (out.get("output") or "") + _memory_marker(self._projected(self.messages))
                 outputs.append(out)
         return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
 
@@ -315,7 +326,7 @@ class MemoryAgent(DefaultAgent):
         exception_info key: swebench.yaml's observation_template does
         `{% if output.exception_info %}` under StrictUndefined, which raises
         UndefinedError if the key is absent."""
-        return {"output": text + _memory_marker(self._count_tokens(self.messages)),
+        return {"output": text + _memory_marker(self._projected(self.messages)),
                 "returncode": returncode, "exception_info": None}
 
     def _handle_manage_context(self) -> dict:
