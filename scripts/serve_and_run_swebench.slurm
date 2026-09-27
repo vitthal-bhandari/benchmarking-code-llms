@@ -257,8 +257,16 @@ echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS 
     # B2 memory arm: drive via our MemoryAgent instead of stock mini-swe-agent.
     # The context cap is enforced by the vLLM server, so pass MAX_MODEL_LEN=32000
     # in --export for A1/A2/A3. MEMORY_POLICY = none | summarize | acm.
+    # Instance selection. Prefer INSTANCE_FILE (a path to a comma/newline list):
+    # sbatch --export is itself comma-separated, so an INSTANCE_IDS comma-list
+    # passed through --export is truncated to its FIRST id (silent n=1 runs).
+    # INSTANCE_FILE keeps the commas out of --export entirely.
     MEM_ID_ARGS=()
-    [ -n "${INSTANCE_IDS:-}" ] && MEM_ID_ARGS=(--instance-ids "$INSTANCE_IDS")
+    if [ -n "${INSTANCE_FILE:-}" ]; then
+      MEM_ID_ARGS=(--instance-ids-file "$INSTANCE_FILE")
+    elif [ -n "${INSTANCE_IDS:-}" ]; then
+      MEM_ID_ARGS=(--instance-ids "$INSTANCE_IDS")
+    fi
     LITELLM_MODEL_REGISTRY_PATH=configs/registry.json \
     python scripts/run_memory_swebench.py \
       -m "$AGENT_MODEL_NAME" \
