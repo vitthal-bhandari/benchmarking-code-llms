@@ -85,6 +85,10 @@ def main():
     ap.add_argument("--slice", dest="slice_spec", default="")
     ap.add_argument("--filter", dest="filter_spec", default="")
     ap.add_argument("--instance-ids", default="", help="comma list; overrides slice/filter")
+    ap.add_argument("--instance-ids-file", default="", help="path to a file of instance ids "
+                    "(comma- and/or newline-separated); overrides slice/filter. Use this instead "
+                    "of --instance-ids for large sets: sbatch --export is itself comma-separated, "
+                    "so a comma-list passed through it gets truncated to the first id.")
     ap.add_argument("-o", "--output", required=True)
     ap.add_argument("-w", "--workers", type=int, default=1)
     ap.add_argument("-m", "--model", default=None)
@@ -104,9 +108,14 @@ def main():
     ds_path = DATASET_MAPPING.get(args.subset, args.subset)
     log.info(f"Loading {ds_path} [{args.split}]")
     instances = list(load_dataset(ds_path, split=args.split))
-    if args.instance_ids:
-        want = {s.strip() for s in args.instance_ids.split(",")}
+    id_text = args.instance_ids
+    if args.instance_ids_file:
+        id_text = (id_text + "," + Path(args.instance_ids_file).read_text()) if id_text \
+            else Path(args.instance_ids_file).read_text()
+    if id_text.strip():
+        want = {s.strip() for s in id_text.replace("\n", ",").split(",") if s.strip()}
         instances = [i for i in instances if i["instance_id"] in want]
+        log.info(f"instance-id filter: {len(want)} requested, {len(instances)} matched in dataset")
     else:
         instances = filter_instances(instances, filter_spec=args.filter_spec, slice_spec=args.slice_spec)
 
