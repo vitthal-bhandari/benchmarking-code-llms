@@ -128,5 +128,85 @@
     "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
     "instance_id": "django__django-11490",
     "model_patch": "diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nindex a44adfc760..276d546b00 100644\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -422,6 +422,12 @@ class SQLCompiler:\n         parts = ()\n         for compiler in compilers:\n             try:\n+                # If the same query appears multiple times in combined_queries,\n+                # clone it to avoid modifying the original query.\n+                if self.query.combined_queries.count(compiler.query) > 1:\n+                    compiler = type(compiler)(\n+                        compiler.query.clone(), self.connection, compiler.using\n+                    )\n                 # If the columns list is limited, then all combined queries\n                 # must have the same columns list. Set the selects defined on\n                 # the query on all combined queries, if not already set.\n"
+  },
+  "django__django-11734": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-11734",
+    "model_patch": ""
+  },
+  "django__django-11964": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-11964",
+    "model_patch": "diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py\nindex d610dc86f0..c5b2f732cb 100755\n--- a/django/db/models/fields/__init__.py\n+++ b/django/db/models/fields/__init__.py\n@@ -15,6 +15,7 @@ from django.core import checks, exceptions, validators\n from django.db import connection, connections, router\n from django.db.models.constants import LOOKUP_SEP\n from django.db.models.query_utils import DeferredAttribute, RegisterLookupMixin\n+from django.db.models.enums import Choices\n from django.utils import timezone\n from django.utils.datastructures import DictWrapper\n from django.utils.dateparse import (\n@@ -1008,6 +1009,8 @@ class CharField(Field):\n         return \"CharField\"\n \n     def to_python(self, value):\n+        if isinstance(value, Choices):\n+            return value.value\n         if isinstance(value, str) or value is None:\n             return value\n         return str(value)\ndiff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py\nindex 189fb4fa44..0ec23ed264 100755\n--- a/django/db/models/query_utils.py\n+++ b/django/db/models/query_utils.py\n@@ -11,6 +11,7 @@ import inspect\n from collections import namedtuple\n \n from django.db.models.constants import LOOKUP_SEP\n+from django.db.models.enums import Choices\n from django.utils import tree\n \n # PathInfo is used when converting lookups (fk__somecol). The contents\n@@ -138,6 +139,17 @@ class DeferredAttribute:\n             data[field_name] = val\n         return data[field_name]\n \n+\n+    def __set__(self, instance, value):\n+        \"\"\"\n+        Store the value. If it's a Choices enum member, convert it to its\n+        underlying value.\n+        \"\"\"\n+        if instance is not None:\n+            if isinstance(value, Choices):\n+                value = value.value\n+            instance.__dict__[self.field.attname] = value\n+\n     def _check_parent_chain(self, instance):\n         \"\"\"\n         Check if the field value can be fetched from a parent field already\n"
+  },
+  "django__django-11740": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-11740",
+    "model_patch": "--- No patch.txt found, creating from git diff ---\ndiff --git a/django/db/migrations/autodetector.py b/django/db/migrations/autodetector.py\nindex 0dc1c77c53..7e92bd616b 100644\n--- a/django/db/migrations/autodetector.py\n+++ b/django/db/migrations/autodetector.py\n@@ -963,6 +963,10 @@ class MigrationAutodetector:\n                             preserve_default = False\n                     else:\n                         field = new_field\n+                    # Fields that are foreignkeys/m2ms depend on stuff\n+                    dependencies = []\n+                    if field.remote_field and field.remote_field.model:\n+                        dependencies.extend(self._get_dependencies_for_foreign_key(field))\n                     self.add_operation(\n                         app_label,\n                         operations.AlterField(\n@@ -970,7 +974,8 @@ class MigrationAutodetector:\n                             name=field_name,\n                             field=field,\n                             preserve_default=preserve_default,\n-                        )\n+                        ),\n+                        dependencies=dependencies,\n                     )\n                 else:\n                     # We cannot alter between m2m and concrete fields\n"
+  },
+  "django__django-12663": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-12663",
+    "model_patch": "diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py\nindex caa03665ea..32a6126839 100644\n--- a/django/db/models/fields/__init__.py\n+++ b/django/db/models/fields/__init__.py\n@@ -21,7 +21,7 @@ from django.utils.dateparse import (\n     parse_date, parse_datetime, parse_duration, parse_time,\n )\n from django.utils.duration import duration_microseconds, duration_string\n-from django.utils.functional import Promise, cached_property\n+from django.utils.functional import LazyObject, Promise, cached_property\n from django.utils.ipv6 import clean_ipv6_address\n from django.utils.itercompat import is_iterable\n from django.utils.text import capfirst\n@@ -804,6 +804,11 @@ class Field(RegisterLookupMixin):\n         \"\"\"Perform preliminary non-db specific value checks and conversions.\"\"\"\n         if isinstance(value, Promise):\n             value = value._proxy____cast()\n+        elif isinstance(value, LazyObject):\n+            value = value._wrapped\n+            # Recursively unwrap nested LazyObjects\n+            while isinstance(value, LazyObject):\n+                value = value._wrapped\n         return value\n \n     def get_db_prep_value(self, value, connection, prepared=False):\n"
+  },
+  "astropy__astropy-14598": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "astropy__astropy-14598",
+    "model_patch": ""
+  },
+  "django__django-11885": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-11885",
+    "model_patch": ""
+  },
+  "django__django-12858": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-12858",
+    "model_patch": ""
+  },
+  "django__django-12406": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-12406",
+    "model_patch": ""
+  },
+  "django__django-11433": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-11433",
+    "model_patch": ""
+  },
+  "django__django-13109": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-13109",
+    "model_patch": ""
+  },
+  "django__django-12965": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-12965",
+    "model_patch": ""
+  },
+  "django__django-13121": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-13121",
+    "model_patch": "diff --git a/django/db/backends/mysql/operations.py b/django/db/backends/mysql/operations.py\nindex af8cfd86b5..cd7170db47 100644\n--- a/django/db/backends/mysql/operations.py\n+++ b/django/db/backends/mysql/operations.py\n@@ -1,5 +1,7 @@\n+import datetime\n import uuid\n \n+from django.utils.dateparse import parse_duration\n from django.conf import settings\n from django.db.backends.base.operations import BaseDatabaseOperations\n from django.utils import timezone\n@@ -315,6 +317,14 @@ class DatabaseOperations(BaseDatabaseOperations):\n             value = uuid.UUID(value)\n         return value\n \n+    def convert_durationfield_value(self, value, expression, connection):\n+        if value is not None:\n+            if isinstance(value, str):\n+                value = parse_duration(value)\n+            else:\n+                value = datetime.timedelta(microseconds=value)\n+        return value\n+\n     def binary_placeholder_sql(self, value):\n         return '_binary %s' if value is not None and not hasattr(value, 'as_sql') else '%s'\n \ndiff --git a/django/db/backends/sqlite3/operations.py b/django/db/backends/sqlite3/operations.py\nindex 9510b5edd9..66077de99d 100644\n--- a/django/db/backends/sqlite3/operations.py\n+++ b/django/db/backends/sqlite3/operations.py\n@@ -10,7 +10,7 @@ from django.db import DatabaseError, NotSupportedError, models\n from django.db.backends.base.operations import BaseDatabaseOperations\n from django.db.models.expressions import Col\n from django.utils import timezone\n-from django.utils.dateparse import parse_date, parse_datetime, parse_time\n+from django.utils.dateparse import parse_date, parse_datetime, parse_duration, parse_time\n from django.utils.duration import duration_microseconds\n from django.utils.functional import cached_property\n \n@@ -321,6 +321,14 @@ class DatabaseOperations(BaseDatabaseOperations):\n     def convert_booleanfield_value(self, value, expression, connection):\n         return bool(value) if value in (1, 0) else value\n \n+    def convert_durationfield_value(self, value, expression, connection):\n+        if value is not None:\n+            if isinstance(value, str):\n+                value = parse_duration(value)\n+            else:\n+                value = datetime.timedelta(microseconds=value)\n+        return value\n+\n     def bulk_insert_sql(self, fields, placeholder_rows):\n         return \" UNION ALL \".join(\n             \"SELECT %s\" % \", \".join(row)\n"
+  },
+  "django__django-13112": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-13112",
+    "model_patch": ""
+  },
+  "django__django-13033": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-13033",
+    "model_patch": ""
+  },
+  "django__django-12754": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-12754",
+    "model_patch": ""
+  },
+  "django__django-12273": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.6-35B-A3B",
+    "instance_id": "django__django-12273",
+    "model_patch": ""
   }
 }
