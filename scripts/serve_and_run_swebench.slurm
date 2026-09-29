@@ -17,7 +17,7 @@
 # WHY combined, not two separate jobs (serve_vllm.slurm + run_swebench_agent.slurm):
 # Tillicum requires --gres=gpu on every job — "CPU-only jobs are not allowed."
 # A separate driver job would need its own GPU it never uses, silently doubling
-# GPU-hour cost for the whole multi-hour driving run. One job = one GPU billed. 
+# GPU-hour cost for the whole multi-hour driving run. One job = one GPU billed.
 # Bonus: same-node localhost traffic can't hit a flaky inter-node proxy, which
 # is the class of bug (Squid ERR_CONNECT_FAIL) that cost days on Klone.
 #
