@@ -158,11 +158,18 @@ def render(traj_path: Path) -> str:
                 body_parts.append(f'<pre class="patch"><span class="lbl">submission (patch)</span>{html.escape(sub)}</pre>')
         else:
             txt = msg_text(m)
-            long = len(txt) > 1400
-            shown = html.escape(txt[:1400]) + ("…" if long else "")
             pre_cls = "obs" if role == "tool" else "prose"
-            body_parts.append(f'<pre class="{pre_cls}">{shown}</pre>' if role == "tool"
-                              else f'<div class="{pre_cls}">{shown}</div>')
+            # show the full body; wrap very long observations in a collapsible
+            # <details> so the page stays scannable but nothing is lost
+            if len(txt) > 2000:
+                head = html.escape(txt[:2000])
+                rest = html.escape(txt[2000:])
+                inner = (f'{head}<details><summary class="more">show {len(txt)-2000:,} more chars</summary>'
+                         f'{rest}</details>')
+            else:
+                inner = html.escape(txt)
+            body_parts.append(f'<pre class="{pre_cls}">{inner}</pre>' if role == "tool"
+                              else f'<div class="{pre_cls}">{inner}</div>')
         tok = approx_tokens(msg_text(m)) + approx_tokens(command_of(m))
         cards.append(
             f'<div class="card {cls}"><div class="chead"><span class="rlabel">{html.escape(label)}</span>'
@@ -223,6 +230,7 @@ pre{{white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--
   border-radius:6px;padding:10px 12px;margin:6px 0 0;overflow-x:auto}}
 pre .lbl{{display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;
   color:var(--faint);margin-bottom:6px}}
+.more{{cursor:pointer;color:var(--accent);font-size:11px;margin-top:6px;display:inline-block}}
 .cmd{{border-left:2px solid var(--agent)}}
 .patch{{border-left:2px solid var(--exit)}}
 .pill{{display:inline-block;font-size:11px;font-weight:600;font-family:"IBM Plex Mono",monospace;
