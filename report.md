@@ -290,3 +290,61 @@ sequence of fixes, each masking the next (all now baked into
 - Full-weights BF16 (dropping the FP8 checkpoint) removes the need for
   DeepGEMM entirely on H200's 141GB — the FP8 choice was only ever a Klone
   48GB-L40S memory workaround.
+
+---
+
+## B2 — Memory management: first full 3-arm run (42 instances, cap 24k)
+
+Setup: Qwen3.6-35B-A3B, SWE-Bench Verified `mem_subset` (42 context-stressing
+instances), hard cap 24,000 tok, identical model + sampling (temp 0.6 / top_p
+0.95 / top_k 20 / seed 0). One variable: the memory policy. Jobs 332110 (none),
+332111 (summarize), 332112 (acm). Token counting = exact Qwen tokenizer
+(calibration ratio **1.000** vs vLLM prompt_tokens on every arm).
+
+| Arm | Submitted | Ctx deaths | Loopers | Total edits | Edits/inst | Voluntary | Peak median |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| A1 none | 0 | **42** | 0 | 0 | 0.0 | — | 20,292 |
+| A2 summarize | 25 | **0** | 15 | 347 | 8.26 | 0 (harness) | 18,117 |
+| A3 acm | 25 | **12** | 5 | 195 | 4.64 | **0 / 195 (0%)** | 19,647 |
+
+("Submitted" = produced a patch; correctness scoring on Klone still pending.)
+
+### Findings
+1. **A1 confirms the subset is genuinely cap-stressing:** 42/42 die at the cap
+   with zero progress — the "cost of doing nothing" baseline.
+2. **ACM Base behaviour reproduces at scale:** A3's voluntary rate is **0/195
+   (0%)** — the untrained model never self-invokes `manage_context`; every edit
+   was the 95% forced fallback. This is exactly the paper's Figure-4 claim
+   ("even strong models lack the proactivity to manage their own context without
+   dedicated training"), now shown for untrained Qwen.
+3. **The two policies fail differently.** A2 (harness compresses directly,
+   budget-aware, before every over-threshold call) **never overflows** (0 ctx
+   deaths) but works harder (347 edits vs 195) and leaves 15 instances looping to
+   the step limit. A3 (nudge-only, model-executed, fires at 95%) **dies 12×** —
+   3 never compressed (ignored the nudge), 9 compressed but a single large
+   observation still blew the budget. → open faithfulness question below.
+4. **More edits ↔ lower success**, monotonic in both arms (advisor's hypothesis
+   confirmed). Success by edit tercile: A2 14/14 → 9/14 → 2/14; A3 11/14 → 11/14
+   → 3/14. Correlation(edits, success): A2 **−0.50**, A3 **−0.58**. Interpretation:
+   edits are largely a *symptom* of a hard/long task, and each lossy compression
+   also risks dropping needed context — both drive success down. (Correlation,
+   not proven causation — the cap-sweep would separate the two.)
+
+### Open faithfulness question (blocks the A3-death conclusion)
+A3's 12 deaths depend on our choice that the 95% fallback only *nudges* (the
+model must execute `manage_context`). If ACM's real `runner.py:930` instead
+*hard-compresses* at the limit, A3 should never die from raw overflow and we
+should add a harness backstop so A3 deaths reflect genuine non-proactivity, not
+missing plumbing. Verify against ACM source before writing this up as a result.
+
+### Deliverables
+- `scripts/render_trajectory_html.py` now charts the real per-step ctx series
+  (true sawtooth + cap line). Rendered set: `site/all/{none,summarize,acm}/`;
+  advisor landing page + 4 hand-picked traces: `site/advisor/index.html`.
+- `report_memory.md` (via `scripts/analyze_memory.py`) — the arm-comparison table.
+
+### Next
+- Klone Apptainer scoring → resolve rate (submitted ≠ resolved).
+- Resolve the ACM 95% faithfulness question; re-run A3 if a backstop is needed.
+- Re-derive `mem_subset` with the exact tokenizer (was chars/4); then cap sweep
+  (16k/24k/32k) for the degradation-curve figure.
