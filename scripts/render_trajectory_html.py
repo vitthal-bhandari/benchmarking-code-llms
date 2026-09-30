@@ -56,26 +56,36 @@ def command_of(m: dict) -> str | None:
     return None
 
 
-def svg_growth_chart(step_tokens: list[int], edit_steps: list[int], width=760, height=140) -> str:
-    """Inline SVG line of live-context tokens per step; red ticks at compressions."""
+def svg_growth_chart(step_tokens: list[int], edit_steps: list[int], cap: int = 0,
+                     width=760, height=140) -> str:
+    """Inline SVG line of live-context tokens per step; red ticks at compressions,
+    an optional dashed cap line. y-axis is scaled to the cap (if given) so the
+    sawtooth is shown relative to the hard limit it is riding against."""
     if not step_tokens:
         return ""
     n = len(step_tokens)
-    mx = max(step_tokens) or 1
+    top = max(max(step_tokens), cap) or 1
+    top = int(top * 1.06)  # headroom so the cap line/peak aren't flush to the edge
     pad = 6
     def x(i): return pad + (i / max(1, n - 1)) * (width - 2 * pad)
-    def y(v): return (height - pad) - (v / mx) * (height - 2 * pad)
+    def y(v): return (height - pad) - (v / top) * (height - 2 * pad)
     pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(step_tokens))
     area = f"{pad},{height-pad} " + pts + f" {x(n-1):.1f},{height-pad}"
     ticks = "".join(
         f'<line x1="{x(s):.1f}" y1="{pad}" x2="{x(s):.1f}" y2="{height-pad}" class="edit-tick"/>'
         for s in edit_steps if 0 <= s < n
     )
+    capline = ""
+    if cap:
+        cy = y(cap)
+        capline = (f'<line x1="{pad}" y1="{cy:.1f}" x2="{width-pad}" y2="{cy:.1f}" class="cap-line"/>'
+                   f'<text x="{width-pad-4}" y="{cy-4:.1f}" class="cap-lbl">cap {cap:,}</text>')
     return f"""<svg viewBox="0 0 {width} {height}" class="chart" preserveAspectRatio="none" role="img"
-      aria-label="context tokens per step, peak {mx:,}">
+      aria-label="context tokens per step, peak {max(step_tokens):,}">
       <polygon points="{area}" class="area"/>
       <polyline points="{pts}" class="line"/>
       {ticks}
+      {capline}
     </svg>"""
 
 
@@ -100,16 +110,25 @@ def render(traj_path: Path) -> str:
 
     mem_path = traj_path.with_name("memory_trace.json")
     mem = json.loads(mem_path.read_text()) if mem_path.exists() else None
-    edit_steps = [i for i, r in enumerate(mem.get("steps", []))
-                  if r.get("edit")] if mem else []
-    summary_spans = {}  # (compressed msg index) -> edit info, if memory trace present
+    cap = mem.get("context_cap", 0) if mem else 0
 
-    # context-token growth: cumulative live-context size after each message
-    running, series = 0, []
-    for m in msgs:
-        running += approx_tokens(msg_text(m)) + approx_tokens(command_of(m))
-        series.append(running)
-    peak = max(series) if series else 0
+    if mem and mem.get("steps"):
+        # REAL per-step live-context time-series (the sawtooth): each step records
+        # ctx_tokens *after* that turn, so compressions show as drops. This is the
+        # exact tokenizer count, not the chars/4 approximation used for no-mem runs.
+        steps = mem["steps"]
+        series = [r.get("ctx_tokens", 0) for r in steps]
+        edit_steps = [i for i, r in enumerate(steps) if r.get("edit")]
+        peak = mem.get("peak_ctx_tokens") or (max(series) if series else 0)
+    else:
+        # no memory trace: approximate cumulative growth from the message list
+        # (monotonic climb — the motivation for memory management)
+        edit_steps = []
+        running, series = 0, []
+        for m in msgs:
+            running += approx_tokens(msg_text(m)) + approx_tokens(command_of(m))
+            series.append(running)
+        peak = max(series) if series else 0
 
     # step cards
     cards = []
@@ -150,7 +169,7 @@ def render(traj_path: Path) -> str:
             f'<span class="toks">~{tok:,} tok</span></div>{"".join(body_parts)}</div>'
         )
 
-    chart = svg_growth_chart(series, edit_steps)
+    chart = svg_growth_chart(series, edit_steps, cap=cap)
     mem_note = ""
     if mem:
         nedits = len(edit_steps)
@@ -185,6 +204,8 @@ h1{{font-size:20px;margin:0 0 4px;letter-spacing:-.01em}}
 .chart .area{{fill:color-mix(in srgb,var(--accent) 12%,transparent);stroke:none}}
 .chart .line{{fill:none;stroke:var(--accent);stroke-width:1.6}}
 .chart .edit-tick{{stroke:#d1495b;stroke-width:1.4;stroke-dasharray:3 2}}
+.chart .cap-line{{stroke:#d1495b;stroke-width:1;stroke-dasharray:5 3;opacity:.7}}
+.chart .cap-lbl{{fill:#d1495b;font-size:9px;text-anchor:end;font-family:"IBM Plex Mono",monospace}}
 .card{{background:var(--surface);border:1px solid var(--hair);border-left-width:3px;
   border-radius:9px;padding:12px 14px;margin-bottom:10px}}
 .chead{{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}}
@@ -215,12 +236,12 @@ pre .lbl{{display:block;font-size:10px;letter-spacing:.06em;text-transform:upper
   <div class="stats">
     <span class="stat"><span class="k">exit</span> <b>{html.escape(str(exit_status))}</b></span>
     <span class="stat"><span class="k">model calls</span> <b>{api_calls}</b></span>
-    <span class="stat"><span class="k">peak context</span> <b>~{peak:,}</b> tok</span>
+    <span class="stat"><span class="k">peak context</span> <b>{peak:,}</b> tok</span>
     <span class="stat"><span class="k">messages</span> <b>{len(msgs)}</b></span>
     {mem_note}
   </div>
   <div class="chartwrap">
-    <div class="cap">Live-context size per message (~tokens){' · red = compression' if edit_steps else ' · no memory management → grows unbounded'}</div>
+    <div class="cap">{'Live-context tokens per step · red dashes = compression events · dashed line = hard cap' if edit_steps else 'Live-context size per message (~tokens) · no memory management → grows into the cap'}</div>
     {chart}
   </div>
   {"".join(cards)}
