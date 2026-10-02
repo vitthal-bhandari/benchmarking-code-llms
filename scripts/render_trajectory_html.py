@@ -112,6 +112,20 @@ def render(traj_path: Path) -> str:
     mem = json.loads(mem_path.read_text()) if mem_path.exists() else None
     cap = mem.get("context_cap", 0) if mem else 0
 
+    # Prefer the append-only raw history for the step cards: traj.json only keeps
+    # the FINAL post-compression live context, so for A2/A3 it hides every span
+    # that was compressed away. raw_messages.json has the full path (originals
+    # *and* the summary messages where they were injected).
+    raw_path = traj_path.with_name("raw_messages.json")
+    card_msgs, is_raw = msgs, False
+    if raw_path.exists():
+        try:
+            rm = json.loads(raw_path.read_text()).get("instance_messages") or []
+            if len(rm) >= len(msgs):
+                card_msgs, is_raw = rm, True
+        except Exception:
+            pass
+
     if mem and mem.get("steps"):
         # REAL per-step live-context time-series (the sawtooth): each step records
         # ctx_tokens *after* that turn, so compressions show as drops. This is the
@@ -133,7 +147,7 @@ def render(traj_path: Path) -> str:
     # step cards
     cards = []
     step_no = 0
-    for m in msgs:
+    for m in card_msgs:
         role = m.get("role", "?")
         label, cls = ROLE_META.get(role, (role.title(), "role-other"))
         body_parts = []
@@ -245,7 +259,7 @@ pre .lbl{{display:block;font-size:10px;letter-spacing:.06em;text-transform:upper
     <span class="stat"><span class="k">exit</span> <b>{html.escape(str(exit_status))}</b></span>
     <span class="stat"><span class="k">model calls</span> <b>{api_calls}</b></span>
     <span class="stat"><span class="k">peak context</span> <b>{peak:,}</b> tok</span>
-    <span class="stat"><span class="k">messages</span> <b>{len(msgs)}</b></span>
+    <span class="stat"><span class="k">messages</span> <b>{len(card_msgs)}</b>{' shown (full history); ' + str(len(msgs)) + ' in final context' if is_raw else ''}</span>
     {mem_note}
   </div>
   <div class="chartwrap">
