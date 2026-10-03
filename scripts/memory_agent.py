@@ -28,6 +28,7 @@ the memory panels in scripts/render_trajectory_html.py.
 """
 from __future__ import annotations
 
+import copy
 import json
 import time
 from pathlib import Path
@@ -99,6 +100,38 @@ FORCE_COMPRESS_PROMPT = (
     "yet. Run `manage_context` now, then continue working."
 )
 
+# ACM caps how many times it will re-ask for a compression, and resets that
+# counter once the context drops back under 90% (runner.py: the
+# `compress_prompt_count < MAX_COMPRESS_RETRIES` guard and the
+# `if token_count < int(context_window * 0.90): compress_prompt_count = 0` reset).
+MAX_COMPRESS_RETRIES = 2
+RESET_FRAC = 0.90
+# Tokens of raw-count headroom reserved for the STOP_PROMPT exchange itself (the
+# prompt plus the model's final submit command). The retry budget must not eat
+# this: a nudge the model ignores still costs a full turn, so without a
+# budget-based escalation the context blows past the hard limit while we are
+# still politely asking it to compress (observed: MiMo took 2 nudges, compressed
+# nothing, and died before the 3rd nudge let STOP_PROMPT fire).
+# Scaled, not flat: ACM's headroom between the 0.95 nudge and the hard wall is
+# only 0.05*context_window, so a fixed reserve eats the whole nudge window at the
+# small caps this study uses. 2% of the cap splits that 5% band roughly 3:2
+# between "ask it to compress" and "make it submit".
+STOP_RESERVE_FRAC = 0.02
+STOP_RESERVE_MIN = 500
+
+# ACM's escalation after the compress nudges are exhausted: rather than letting
+# the episode die on overflow, it injects a STOP_PROMPT, takes ONE more response
+# and extracts a final answer from it. SWE-bench adaptation: the "final answer"
+# is the submission, which mini-swe-agent detects via this sentinel in a bash
+# command, so we spell the command out verbatim.
+STOP_PROMPT = (
+    "STOP. Your context is full and you cannot continue investigating. Do NOT run "
+    "any more exploration commands. Submit whatever work you have RIGHT NOW as your "
+    "final answer, by running exactly this as the entire command:\n"
+    "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cd /testbed && git diff\n"
+    "If you have made no edits yet, run it anyway so an empty patch is recorded."
+)
+
 
 def _memory_marker(n: int) -> str:
     return f"\n[CURRENT CONTEXT TOKEN: {n}]"
@@ -143,6 +176,24 @@ class MemoryAgent(DefaultAgent):
         self._pending_edit: dict | None = None
         self._last_mc_end = 2             # A3: start of the next compressible range
         self._calibrated = False          # log token-count vs vLLM prompt_tokens once
+        self._compress_prompt_count = 0   # A3: ACM's bounded compress-nudge retries
+        self._compress_prompts_total = 0  # cumulative (the above resets under 90%)
+        self._stop_prompted = False       # A3: STOP_PROMPT is injected at most once
+        # Append-only mirror of every message ever added, never compressed — ACM's
+        # HistoryManager.raw_messages ("for traj dumps"). self.messages loses the
+        # compressed spans, so without this the full trajectory is unrecoverable.
+        self.raw_messages: list[dict] = []
+
+    def add_messages(self, *messages):
+        """Mirror into the append-only raw history before the live list can be
+        compressed. Everything mini-swe-agent adds (system, task, assistant turns,
+        observations) flows through here."""
+        for m in messages:
+            try:
+                self.raw_messages.append(copy.deepcopy(m))
+            except Exception:
+                self.raw_messages.append(dict(m) if isinstance(m, dict) else {"raw": str(m)})
+        return super().add_messages(*messages)
 
     # ── token accounting ────────────────────────────────────────────────
     # ACM's finding (client.py LocalClient.count_tokens): count with the MODEL's
@@ -284,14 +335,42 @@ class MemoryAgent(DefaultAgent):
             end = self._compressible_tail_boundary(since=2)
             if end > 2:
                 self._compress_range(2, end, trigger="harness")
-        elif self.memory_policy == "acm" and self._projected(self.messages) >= int(self.context_cap * self.force_frac):
-            # ACM-style forced nudge — fires at force_frac of the cap (0.95,
-            # matching ACM runner.py:930). _projected already adds the output
-            # reservation, so this compares a true upper bound on the next
-            # prompt against the cap. Inject once per crossing.
-            if not (self.messages and self.messages[-1].get("extra", {}).get("force_compress")):
-                self.add_messages({"role": "user", "content": FORCE_COMPRESS_PROMPT,
-                                   "extra": {"force_compress": True}})
+        elif self.memory_policy == "acm":
+            # ACM's per-turn context check (runner.py), in its order:
+            #   1. reset the compress-attempt counter once we drop back under 90%
+            #   2. at >=force_frac, nudge the model to compress — but only while
+            #      attempts remain (MAX_COMPRESS_RETRIES)
+            #   3. once they're exhausted, escalate to STOP_PROMPT so the episode
+            #      ends with a submission instead of dying on overflow
+            # _projected already adds the output reservation, so these compare a
+            # true upper bound on the next prompt against the cap.
+            proj = self._projected(self.messages)
+            count = proj - self._max_tokens_reserve
+            # the real wall: vLLM rejects any prompt above this raw count
+            hard_limit = self.context_cap - self._max_tokens_reserve
+            if proj < int(self.context_cap * RESET_FRAC):
+                self._compress_prompt_count = 0
+            if proj >= int(self.context_cap * self.force_frac):
+                last_extra = self.messages[-1].get("extra", {}) if self.messages else {}
+                # Escalate on EITHER exhausted retries or exhausted headroom —
+                # whichever comes first. Spending the last tokens on a submission
+                # beats spending them on a nudge the model may ignore again.
+                reserve = max(STOP_RESERVE_MIN, int(self.context_cap * STOP_RESERVE_FRAC))
+                out_of_room = count >= hard_limit - reserve
+                if self._compress_prompt_count < MAX_COMPRESS_RETRIES and not out_of_room:
+                    if not last_extra.get("force_compress"):
+                        self.add_messages({"role": "user", "content": FORCE_COMPRESS_PROMPT,
+                                           "extra": {"force_compress": True}})
+                        self._compress_prompt_count += 1
+                        self._compress_prompts_total += 1
+                elif not self._stop_prompted:
+                    why = "out of headroom" if out_of_room else "nudges exhausted"
+                    self.logger.warning(
+                        f"[acm] {why} (nudges={self._compress_prompt_count}, count={count}, "
+                        f"hard_limit={hard_limit}) — escalating to STOP_PROMPT")
+                    self.add_messages({"role": "user", "content": STOP_PROMPT,
+                                       "extra": {"stop_prompt": True}})
+                    self._stop_prompted = True
         # one-time calibration: does our token count match vLLM's real prompt?
         pre_count = self._count_tokens(self.messages) if not self._calibrated else None
         msg = super().query()
@@ -391,9 +470,25 @@ class MemoryAgent(DefaultAgent):
             "archive_tokens": archive_tokens,
             "steps": self.mem_steps,
             "edits": edits,
+            "compress_prompts": self._compress_prompts_total,
+            "stop_prompted": self._stop_prompted,
+            "n_raw_messages": len(self.raw_messages),
             "saved_at": time.time(),
         }
         try:
             (Path(path).parent / "memory_trace.json").write_text(json.dumps(trace, indent=2))
         except Exception as e:
             self.logger.warning(f"could not write memory_trace.json: {e}")
+        # The append-only history: the full step-by-step path including every span
+        # that compression removed from self.messages. Kept in its own file so
+        # memory_trace.json stays small enough to load for aggregate analysis.
+        try:
+            (Path(path).parent / "raw_messages.json").write_text(
+                json.dumps({"instance_messages": self.raw_messages}, indent=2, default=str))
+        except Exception as e:
+            self.logger.warning(f"could not write raw_messages.json: {e}")
+        if self.memory_policy == "none" and len(self.raw_messages) != len(self.messages):
+            # with no compression the mirror must equal the live list; a mismatch
+            # means some code path appends to self.messages without add_messages
+            self.logger.warning(f"[raw-mirror] policy=none but raw={len(self.raw_messages)} "
+                                f"live={len(self.messages)} — mirror is missing messages")

@@ -166,7 +166,13 @@ KV_CACHE_ARGS=(); [ -n "$KV_CACHE_DTYPE" ] && KV_CACHE_ARGS=(--kv-cache-dtype "$
 # native level. Cap EVERY modality the model supports so the warmup is skipped
 # entirely (also frees the encoder-cache memory). Override LIMIT_MM="" to
 # re-enable, or edit the JSON if a model exposes other modalities.
-if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0}'; fi
+# audio is zeroed too: gemma-4-*-it carries an audio tower, and leaving it
+# enabled makes vLLM construct Gemma4UnifiedAudioFeatureExtractor, which dies
+# with "no attribute 'fft_length'" against both transformers 5.16.0.dev0 and
+# 5.18.0 (a vLLM<->transformers API mismatch, not a stale version). Nothing in a
+# coding benchmark needs any modality but text. NB: this value contains commas,
+# so it can only be set here — sbatch --export would split it.
+if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0,"audio":0}'; fi
 MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
 MOE_ARGS=(); [ -n "$MOE_BACKEND" ] && MOE_ARGS=(--kernel-config.moe_backend "$MOE_BACKEND")
 MAX_LEN_ARGS=(); [ -n "$MAX_MODEL_LEN" ] && MAX_LEN_ARGS=(--max-model-len "$MAX_MODEL_LEN")
@@ -176,6 +182,10 @@ MAX_LEN_ARGS=(); [ -n "$MAX_MODEL_LEN" ] && MAX_LEN_ARGS=(--max-model-len "$MAX_
 # OFF now (CUDA graphs on = fast, and it's vLLM's own default). Set
 # ENFORCE_EAGER=1 only if a model's graph capture proves unstable on 0.28.
 EAGER_ARGS=(); [ -n "${ENFORCE_EAGER:-}" ] && EAGER_ARGS=(--enforce-eager)
+# Reasoning/thinking models need their own parser so the <think> span is split
+# out of the tool-call stream (MiMo: REASONING_PARSER=mimo; Qwen3.5 thinking:
+# qwen3). Without it the thinking text is parsed as content and tool calls break.
+REASONING_ARGS=(); [ -n "${REASONING_PARSER:-}" ] && REASONING_ARGS=(--reasoning-parser "$REASONING_PARSER")
 
 SERVER_LOG="logs/vllm_serve_inline_${SLURM_JOB_ID:-local}.log"
 echo ">>> [server] Starting $MODEL_NAME on $(hostname):$PORT (job ${SLURM_JOB_ID:-local})"
@@ -187,6 +197,7 @@ echo ">>> [server] venv: $SERVE_VENV  |  max_model_len: ${MAX_MODEL_LEN:-native/
     --host 0.0.0.0 --port "$PORT" \
     --dtype auto --trust-remote-code \
     --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER" \
+    "${REASONING_ARGS[@]}" \
     "${EAGER_ARGS[@]}" "${MAX_LEN_ARGS[@]}" "${QUANT_ARGS[@]}" "${BATCH_ARGS[@]}" "${KV_CACHE_ARGS[@]}" "${MM_ARGS[@]}" "${MOE_ARGS[@]}"
 ) > "$SERVER_LOG" 2>&1 &
 VLLM_PID=$!
@@ -235,7 +246,6 @@ EOF
 # not sampling noise. (litellm passes temp/top_p/seed/presence_penalty; top_k is
 # vLLM-specific and may be dropped under drop_params — harmless.)
 [ -n "${TOP_P:-}" ] && echo "    top_p: ${TOP_P}" >> "$API_OVERRIDE"
-[ -n "${TOP_K:-}" ] && echo "    top_k: ${TOP_K}" >> "$API_OVERRIDE"
 [ -n "${SEED:-}" ] && echo "    seed: ${SEED}" >> "$API_OVERRIDE"
 [ -n "${PRESENCE_PENALTY:-}" ] && echo "    presence_penalty: ${PRESENCE_PENALTY}" >> "$API_OVERRIDE"
 # MAX_TOKENS caps output per agent step. Without it, a model that rambles (e.g.
@@ -246,6 +256,27 @@ EOF
 # model to respond more concisely and retry. Uniform across models; harmless for
 # ones (Qwen) whose steps are already well under it. 8192 is a sane default.
 [ -n "${MAX_TOKENS:-}" ] && echo "    max_tokens: ${MAX_TOKENS}" >> "$API_OVERRIDE"
+
+# vLLM-specific sampling params (top_k, min_p, repetition_penalty) are NOT part
+# of the OpenAI schema, so litellm drops them under drop_params — they were
+# silently ineffective before. extra_body is forwarded verbatim to the endpoint,
+# which is also where chat_template_kwargs must go to toggle thinking mode.
+# ENABLE_THINKING=false gives a clean memory study: thinking traces otherwise
+# inflate the context and confound the memory signal.
+# vLLM takes these as TOP-LEVEL fields of the request body (no sampling_params
+# nesting on the OpenAI-compatible server), so they sit directly under extra_body.
+EB=()
+[ -n "${TOP_K:-}" ]              && EB+=("      top_k: ${TOP_K}")
+[ -n "${MIN_P:-}" ]              && EB+=("      min_p: ${MIN_P}")
+[ -n "${REPETITION_PENALTY:-}" ] && EB+=("      repetition_penalty: ${REPETITION_PENALTY}")
+if [ ${#EB[@]} -gt 0 ] || [ -n "${ENABLE_THINKING:-}" ]; then
+  echo "    extra_body:" >> "$API_OVERRIDE"
+  [ ${#EB[@]} -gt 0 ] && printf '%s\n' "${EB[@]}" >> "$API_OVERRIDE"
+  if [ -n "${ENABLE_THINKING:-}" ]; then
+    echo "      chat_template_kwargs:" >> "$API_OVERRIDE"
+    echo "        enable_thinking: ${ENABLE_THINKING}" >> "$API_OVERRIDE"
+  fi
+fi
 
 echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS | Temperature: ${TEMPERATURE:-model default} | Max_tokens: ${MAX_TOKENS:-model default (uncapped)} | Output: $OUTPUT_DIR"
 (
