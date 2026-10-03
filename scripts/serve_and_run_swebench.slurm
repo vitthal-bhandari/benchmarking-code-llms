@@ -166,7 +166,13 @@ KV_CACHE_ARGS=(); [ -n "$KV_CACHE_DTYPE" ] && KV_CACHE_ARGS=(--kv-cache-dtype "$
 # native level. Cap EVERY modality the model supports so the warmup is skipped
 # entirely (also frees the encoder-cache memory). Override LIMIT_MM="" to
 # re-enable, or edit the JSON if a model exposes other modalities.
-if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0}'; fi
+# audio is zeroed too: gemma-4-*-it carries an audio tower, and leaving it
+# enabled makes vLLM construct Gemma4UnifiedAudioFeatureExtractor, which dies
+# with "no attribute 'fft_length'" against both transformers 5.16.0.dev0 and
+# 5.18.0 (a vLLM<->transformers API mismatch, not a stale version). Nothing in a
+# coding benchmark needs any modality but text. NB: this value contains commas,
+# so it can only be set here — sbatch --export would split it.
+if [ -z "${LIMIT_MM+x}" ]; then LIMIT_MM='{"image":0,"video":0,"audio":0}'; fi
 MM_ARGS=(); [ -n "$LIMIT_MM" ] && MM_ARGS=(--limit-mm-per-prompt "$LIMIT_MM")
 MOE_ARGS=(); [ -n "$MOE_BACKEND" ] && MOE_ARGS=(--kernel-config.moe_backend "$MOE_BACKEND")
 MAX_LEN_ARGS=(); [ -n "$MAX_MODEL_LEN" ] && MAX_LEN_ARGS=(--max-model-len "$MAX_MODEL_LEN")
