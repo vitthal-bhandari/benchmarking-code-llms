@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+from collections import Counter
 from pathlib import Path
 
 import litellm
@@ -307,6 +308,13 @@ class MemoryAgent(DefaultAgent):
         self.archive: list[dict] = []     # [{summary_id, messages:[...]}]
         self.n_edits = 0
         self.n_retrievals = 0
+        self._t0 = time.time()
+        self._tool_calls = Counter()      # bash / manage_context / query_memory
+        self._usage = []                  # (prompt_tokens, completion_tokens) per agent call
+        self._last_usage = None
+        self._obs_tokens = []             # size of every observation fed back
+        self._mem_op_usage = [0, 0]       # tokens the summarizer + retrieval calls cost
+        self._mem_op_calls = 0
         self._pending_edit: dict | None = None
         self._last_mc_end = 2             # A3: start of the next compressible range
         self._calibrated = False          # log token-count vs vLLM prompt_tokens once
@@ -406,6 +414,7 @@ class MemoryAgent(DefaultAgent):
                 messages=[{"role": "system", "content": SUMMARIZER_SYSTEM}, {"role": "user", "content": user}],
                 **kwargs,  # NB: no tools — plain completion
             )
+            self._note_mem_op(resp)
             return (resp.choices[0].message.content or "").strip()
         except Exception as e:
             self.logger.warning(f"summarizer call failed: {e}")
@@ -515,6 +524,11 @@ class MemoryAgent(DefaultAgent):
         # one-time calibration: does our token count match vLLM's real prompt?
         pre_count = self._count_tokens(self.messages) if not self._calibrated else None
         msg = super().query()
+        usage = ((msg.get("extra", {}).get("response") or {}).get("usage") or {})
+        pt, ct = usage.get("prompt_tokens"), usage.get("completion_tokens")
+        if pt is not None:
+            self._usage.append((pt, ct or 0))
+            self._last_usage = (pt, ct or 0)
         if pre_count is not None:
             actual = ((msg.get("extra", {}).get("response") or {}).get("usage") or {}).get("prompt_tokens")
             if actual:
@@ -525,8 +539,16 @@ class MemoryAgent(DefaultAgent):
 
     # ── A3 hook: intercept manage_context / query_memory bash commands ───
     def execute_actions(self, message: dict) -> list[dict]:
+        acts = message.get("extra", {}).get("actions", []) or []
+        for a in acts:
+            self._tool_calls[a.get("mem_tool") or
+                             ("manage_context" if (a.get("command") or "").strip() == "manage_context"
+                              else "query_memory" if (a.get("command") or "").startswith("query_memory")
+                              else "bash")] += 1
         if self.memory_policy != "acm":
-            return super().execute_actions(message)
+            out = super().execute_actions(message)
+            self._record_obs(out)
+            return out
         outputs = []
         for action in message.get("extra", {}).get("actions", []):
             cmd = (action.get("command") or "").strip()
@@ -541,7 +563,9 @@ class MemoryAgent(DefaultAgent):
                 out = dict(out)
                 out["output"] = (out.get("output") or "") + _memory_marker(self._projected(self.messages))
                 outputs.append(out)
-        return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+        msgs = self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+        self._record_obs(msgs)
+        return msgs
 
     def _obs(self, text: str, returncode: int = 0) -> dict:
         """Synthetic observation matching env.execute's shape. Must carry an
@@ -604,6 +628,7 @@ class MemoryAgent(DefaultAgent):
                 ],
                 **kwargs,  # NB: no tools — plain completion
             )
+            self._note_mem_op(resp)
             found = (resp.choices[0].message.content or "").strip()
         except Exception as e:
             self.logger.warning(f"query_memory extraction failed: {e}")
@@ -612,12 +637,39 @@ class MemoryAgent(DefaultAgent):
         return self._obs(f"[summary_id: {sid}] retrieved for \"{query}\":\n{found}")
 
     # ── per-turn telemetry ──────────────────────────────────────────────
+    def _record_obs(self, msgs) -> None:
+        """Size of what each tool result puts back into context. Observation size
+        is the main driver of context growth and differs sharply between
+        benchmarks (test output vs file dumps vs terminal scrollback), so it is
+        the key quantity for comparing token behaviour ACROSS datasets."""
+        for m in (msgs or []):
+            try:
+                self._obs_tokens.append(self._count_tokens([m]))
+            except Exception:
+                pass
+
+    def _note_mem_op(self, resp) -> None:
+        """Summarizer and retrieval calls are real token cost that never appears
+        in the agent's own trajectory — A2/A3 pay it and A1 does not, so it has
+        to be counted separately for any honest efficiency comparison."""
+        self._mem_op_calls += 1
+        try:
+            u = resp.usage
+            self._mem_op_usage[0] += int(getattr(u, "prompt_tokens", 0) or 0)
+            self._mem_op_usage[1] += int(getattr(u, "completion_tokens", 0) or 0)
+        except Exception:
+            pass
+
     def step(self) -> list[dict]:
         result = super().step()
+        pt, ct = self._last_usage or (None, None)
+        self._last_usage = None
         self.mem_steps.append({
             "step": self.n_calls,
             "ctx_tokens": self._count_tokens(self.messages),
             "n_messages": len(self.messages),
+            "prompt_tokens": pt,
+            "completion_tokens": ct,
             "edit": self._pending_edit,
         })
         self._pending_edit = None
@@ -645,6 +697,34 @@ class MemoryAgent(DefaultAgent):
             "archive_tokens": archive_tokens,
             "steps": self.mem_steps,
             "edits": edits,
+            # ── trajectory / cost metrics ────────────────────────────────
+            "n_steps": len(self.mem_steps),
+            "wall_seconds": round(time.time() - self._t0, 1),
+            "tool_calls": dict(self._tool_calls),
+            "n_tool_calls": sum(self._tool_calls.values()),
+            "total_prompt_tokens": sum(u[0] for u in self._usage),
+            "total_completion_tokens": sum(u[1] for u in self._usage),
+            "mem_op_calls": self._mem_op_calls,
+            "mem_op_prompt_tokens": self._mem_op_usage[0],
+            "mem_op_completion_tokens": self._mem_op_usage[1],
+            "obs_tokens_mean": int(sum(self._obs_tokens) / len(self._obs_tokens)) if self._obs_tokens else 0,
+            "obs_tokens_p90": (sorted(self._obs_tokens)[int(len(self._obs_tokens) * 0.9)]
+                               if self._obs_tokens else 0),
+            "obs_tokens_max": max(self._obs_tokens) if self._obs_tokens else 0,
+            "n_observations": len(self._obs_tokens),
+            # ── benchmark-invariant ratios (comparable across datasets/caps) ──
+            # ctx_utilization: how much of the budget the run actually used
+            # growth_per_step: how fast this benchmark fills context
+            # compression_ratio: how much a summary retains of what it replaced
+            # mem_overhead: memory-op tokens as a share of agent tokens
+            "ctx_utilization": round(max(ctx) / max(1, self.context_cap), 3),
+            "growth_per_step": int(max(ctx) / max(1, len(self.mem_steps))),
+            "compression_ratio": (round(sum(e["summary_tokens"] for e in edits) /
+                                        max(1, sum(e["tokens_before"] - e["tokens_after"] for e in edits)), 3)
+                                  if edits else None),
+            "mem_overhead": (round(sum(self._mem_op_usage) /
+                                   max(1, sum(u[0] + u[1] for u in self._usage)), 4)
+                             if self._usage else None),
             "compress_prompts": self._compress_prompts_total,
             "stop_prompted": self._stop_prompted,
             "n_raw_messages": len(self.raw_messages),
