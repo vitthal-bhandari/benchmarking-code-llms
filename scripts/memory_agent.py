@@ -104,7 +104,7 @@ FORCE_COMPRESS_PROMPT = (
 # counter once the context drops back under 90% (runner.py: the
 # `compress_prompt_count < MAX_COMPRESS_RETRIES` guard and the
 # `if token_count < int(context_window * 0.90): compress_prompt_count = 0` reset).
-MAX_COMPRESS_RETRIES = 2
+MAX_COMPRESS_RETRIES = 3
 RESET_FRAC = 0.90
 # Tokens of raw-count headroom reserved for the STOP_PROMPT exchange itself (the
 # prompt plus the model's final submit command). The retry budget must not eat
@@ -112,12 +112,21 @@ RESET_FRAC = 0.90
 # budget-based escalation the context blows past the hard limit while we are
 # still politely asking it to compress (observed: MiMo took 2 nudges, compressed
 # nothing, and died before the 3rd nudge let STOP_PROMPT fire).
-# Scaled, not flat: ACM's headroom between the 0.95 nudge and the hard wall is
-# only 0.05*context_window, so a fixed reserve eats the whole nudge window at the
-# small caps this study uses. 2% of the cap splits that 5% band roughly 3:2
-# between "ask it to compress" and "make it submit".
-STOP_RESERVE_FRAC = 0.02
-STOP_RESERVE_MIN = 500
+# Headroom budgets, in ABSOLUTE tokens measured back from the hard prompt wall.
+#
+# ACM triggers at 0.95*context_window, which assumes a large window: at their
+# ~128k that leaves ~6.4k tokens between "start nudging" and "rejected". At the
+# 24-28k budgets this study imposes, 5% is only ~1.2-1.4k — less than one tool
+# observation — so the nudge and the stop escalation collide and neither gets to
+# work (observed: all three models made ZERO edits, and Gemma skipped straight to
+# STOP without ever nudging). We therefore keep ACM's rule but take whichever
+# fires FIRST, so the mechanism retains the same absolute room ACM enjoys:
+#   nudge  when within NUDGE_RESERVE of the wall (or at ACM's 0.95, if earlier)
+#   STOP   when within STOP_RESERVE  of the wall
+# This is a documented deviation forced by the small-window regime, not a change
+# to ACM's semantics.
+NUDGE_RESERVE = 4000
+STOP_RESERVE = 1000
 
 # ACM's escalation after the compress nudges are exhausted: rather than letting
 # the episode die on overflow, it injects a STOP_PROMPT, takes ONE more response
@@ -350,13 +359,15 @@ class MemoryAgent(DefaultAgent):
             hard_limit = self.context_cap - self._max_tokens_reserve
             if proj < int(self.context_cap * RESET_FRAC):
                 self._compress_prompt_count = 0
-            if proj >= int(self.context_cap * self.force_frac):
+            nudge_at = min(int(self.context_cap * self.force_frac) - self._max_tokens_reserve,
+                           hard_limit - NUDGE_RESERVE)
+            if count >= nudge_at:
                 last_extra = self.messages[-1].get("extra", {}) if self.messages else {}
-                # Escalate on EITHER exhausted retries or exhausted headroom —
-                # whichever comes first. Spending the last tokens on a submission
-                # beats spending them on a nudge the model may ignore again.
-                reserve = max(STOP_RESERVE_MIN, int(self.context_cap * STOP_RESERVE_FRAC))
-                out_of_room = count >= hard_limit - reserve
+                # Escalate on exhausted retries or exhausted headroom, whichever
+                # comes first — but never before the model has had at least one
+                # chance to compress, or the mechanism is never exercised at all.
+                out_of_room = (count >= hard_limit - STOP_RESERVE
+                               and self._compress_prompt_count > 0)
                 if self._compress_prompt_count < MAX_COMPRESS_RETRIES and not out_of_room:
                     if not last_extra.get("force_compress"):
                         self.add_messages({"role": "user", "content": FORCE_COMPRESS_PROMPT,
