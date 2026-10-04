@@ -66,38 +66,53 @@ Preserve identifiers verbatim: file paths, function/class names, test IDs, error
 messages, line numbers. Keep it under 4096 tokens. Your reply must start with
 `<memory>` and end with `</memory>`."""
 
+RETRIEVAL_SYSTEM = (
+    "You retrieve detail from an AI coding agent's archived (compressed) messages. "
+    "Answer ONLY from the archived text provided. Quote identifiers verbatim: file "
+    "paths, function and class names, test ids, error messages, line numbers. Be "
+    "concise — your reply is injected back into a context that is already tight. If "
+    "the archive does not contain the answer, say exactly that."
+)
+
 # ── ACM system-prompt addendum (A3 only; appended by the driver) ──
 ACM_SYSTEM_ADDENDUM = """
 
 ## Managing your context memory
 Your in-context conversation is short-term memory; compressed segments live in
-long-term memory on disk. After each command result the system appends
+long-term memory on disk. After each tool result the system appends
 "[CURRENT CONTEXT TOKEN: N]" — your current context usage. Read it; never write
 it yourself.
 
-Two extra commands are available through the bash tool:
-- `manage_context` — run this (as the entire command) to compress everything
-  since your previous manage_context call into a single on-disk summary, freeing
-  context. The system picks the range; the summary is returned with a
-  [summary_id: N] tag. This does NOT end the task — keep working after it.
-- `query_memory <summary_id>` — retrieve the original messages behind a prior
-  summary when you need detail you compressed away.
+You have two extra tools beyond `bash`:
+- The `manage_context` tool takes no arguments. When you call it, the system
+  compresses everything in your conversation since your previous manage_context
+  call (or since the start of the task if this is your first call) up to — but
+  not including — the message that issued the call. The system prompt and the
+  original task are always preserved. A summary tagged "[summary_id: N]" is
+  returned and the original messages are saved to disk. This does NOT end the
+  task — keep working after it.
+- Use the `query_memory` tool to retrieve detailed information from any prior
+  summary's original messages by referencing its summary_id, together with a
+  query describing exactly what you need.
 
 Guidance: when [CURRENT CONTEXT TOKEN: N] climbs and your recent turns contain
-dead ends or duplicated exploration, call `manage_context` to free space. Make
-sure your work so far is captured before you do. Do not compress away the exact
-edit you are mid-way through."""
+dead ends or duplicated exploration, call manage_context to free space. Make sure
+your work so far is captured before you do. Do not compress away the exact edit
+you are mid-way through."""
 
 
 # ── Forced-compression nudge (A3), adapted from ACM's BCP_COMPRESS_PROMPT ──
 # ACM injects this at 95% of the context window (runner.py:930) so the agent
 # doesn't just die when it fails to compress voluntarily. It's still the *model*
 # that executes the compression — we only nudge; we never compress for it in A3.
+# Mirrors ACM's BCP_COMPRESS_PROMPT, which frames this as a TOOL CALL
+# ("You MUST immediately call manage_context()"), not a shell command.
 FORCE_COMPRESS_PROMPT = (
-    "WARNING: your context is nearly full and the task is not finished. You MUST "
-    "immediately issue `manage_context` (as the entire command) to compress "
-    "everything since your last manage_context call and free space. Do NOT submit "
-    "yet. Run `manage_context` now, then continue working."
+    "WARNING: Your context is nearly full, but your task is not yet complete.\n\n"
+    "You MUST immediately call manage_context() to compress everything since your "
+    "previous manage_context call into a single summary, freeing space. Do NOT "
+    "submit yet, and do NOT run any other tool first. Call manage_context now, "
+    "then continue working."
 )
 
 # ACM caps how many times it will re-ask for a compression, and resets that
@@ -142,6 +157,113 @@ STOP_PROMPT = (
 )
 
 
+# ── ACM's two memory tools, registered as REAL function-calling tools ──
+# Schemas mirror src/tools.py in the ACM repo: manage_context is parameterless,
+# query_memory takes (summary_id, query) and SEARCHES the archived originals.
+# Registering them matters: mini-swe-agent exposes only a bash tool, so our
+# earlier build made the model type "manage_context" as a shell command — an
+# off-distribution affordance that models post-trained to call tools largely
+# ignored (Qwen and MiMo refused 3 explicit nudges each; Gemma complied once).
+MANAGE_CONTEXT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "manage_context",
+        "description": (
+            "Compress your working memory. Call this when context is filling up with dead "
+            "ends, duplicates, or detail you no longer need verbatim. The system "
+            "automatically selects the compression range from your last manage_context call "
+            "(or the start of the investigation) up to the current message, preserving the "
+            "system prompt and the original question. A summary prefixed with "
+            "\"[summary_id: N]\" is returned and the original messages are saved to disk."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+QUERY_MEMORY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "query_memory",
+        "description": (
+            "Retrieve detailed information from a previously compressed summary. Each "
+            "manage_context call returns a summary prefixed with \"[summary_id: N]\"; pass "
+            "that N here together with what you need, and the original (uncompressed) "
+            "messages behind it will be searched."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary_id": {
+                    "type": "integer",
+                    "description": (
+                        "The summary_id (as shown in the [summary_id: N] prefix of a prior "
+                        "manage_context summary) whose original content should be searched."
+                    ),
+                },
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "What specific information to extract from the original messages of "
+                        "that summary."
+                    ),
+                },
+            },
+            "required": ["summary_id", "query"],
+        },
+    },
+}
+MEM_TOOLS = [MANAGE_CONTEXT_TOOL, QUERY_MEMORY_TOOL]
+MEM_TOOL_NAMES = {"manage_context", "query_memory"}
+
+
+def _install_memory_tools(model):
+    """Rebind `model` to a subclass that advertises the two memory tools and
+    accepts their tool calls. mini-swe-agent hardcodes tools=[BASH_TOOL] in
+    _query and parse_toolcall_actions raises FormatError on any other name, so
+    both have to be overridden; bash keeps going through the stock parser so its
+    error semantics are unchanged."""
+    from minisweagent.models.utils.actions_toolcall import parse_toolcall_actions
+
+    base = type(model)
+    if getattr(base, "_acm_memory_tools", False):
+        return model
+
+    class _WithMemoryTools(base):
+        _acm_memory_tools = True
+
+        def _query(self, messages, **kwargs):
+            return litellm.completion(
+                model=self.config.model_name,
+                messages=messages,
+                tools=[BASH_TOOL, *MEM_TOOLS],
+                **(self.config.model_kwargs | kwargs),
+            )
+
+        def _parse_actions(self, response) -> list[dict]:
+            tool_calls = response.choices[0].message.tool_calls or []
+            tmpl_kwargs = {"finish_reason": response.choices[0].finish_reason}
+            if not tool_calls:  # delegate so the canonical FormatError is raised
+                return parse_toolcall_actions(
+                    [], format_error_template=self.config.format_error_template,
+                    template_kwargs=tmpl_kwargs)
+            actions = []
+            for tc in tool_calls:  # preserve the model's ordering
+                if tc.function.name in MEM_TOOL_NAMES:
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except Exception:
+                        args = {}
+                    actions.append({"command": tc.function.name, "tool_call_id": tc.id,
+                                    "mem_tool": tc.function.name, "mem_args": args})
+                else:
+                    actions += parse_toolcall_actions(
+                        [tc], format_error_template=self.config.format_error_template,
+                        template_kwargs=tmpl_kwargs)
+            return actions
+
+    model.__class__ = _WithMemoryTools
+    return model
+
+
 def _memory_marker(n: int) -> str:
     return f"\n[CURRENT CONTEXT TOKEN: {n}]"
 
@@ -161,6 +283,8 @@ class MemoryAgent(DefaultAgent):
     ):
         super().__init__(model, env, **kwargs)  # memory_* are captured here, not passed to AgentConfig
         self.memory_policy = memory_policy
+        if memory_policy == "acm":
+            _install_memory_tools(model)
         self.context_cap = context_cap
         self.summarize_at = summarize_at
         self.keep_last_k = keep_last_k
@@ -182,6 +306,7 @@ class MemoryAgent(DefaultAgent):
         self.mem_steps: list[dict] = []   # per-turn: {step, ctx_tokens, n_messages, edit}
         self.archive: list[dict] = []     # [{summary_id, messages:[...]}]
         self.n_edits = 0
+        self.n_retrievals = 0
         self._pending_edit: dict | None = None
         self._last_mc_end = 2             # A3: start of the next compressible range
         self._calibrated = False          # log token-count vs vLLM prompt_tokens once
@@ -232,7 +357,7 @@ class MemoryAgent(DefaultAgent):
         tok = self._get_tokenizer()
         if tok is not None:
             try:
-                ids = tok.apply_chat_template(api_msgs, tools=[BASH_TOOL],
+                ids = tok.apply_chat_template(api_msgs, tools=self._tools_for_counting(),
                                               add_generation_prompt=True, tokenize=True)
                 if ids and isinstance(ids[0], list):
                     ids = ids[0]
@@ -244,7 +369,7 @@ class MemoryAgent(DefaultAgent):
                 r = requests.post(
                     self._tokenize_url,
                     json={"model": self._served_model, "messages": api_msgs,
-                          "tools": [BASH_TOOL], "add_generation_prompt": True},
+                          "tools": self._tools_for_counting(), "add_generation_prompt": True},
                     timeout=20,
                 )
                 if r.ok:
@@ -255,6 +380,11 @@ class MemoryAgent(DefaultAgent):
             return int(litellm.token_counter(model=self.model.config.model_name, messages=api_msgs))
         except Exception:
             return sum(len(str(m.get("content", ""))) for m in messages) // 4
+
+    def _tools_for_counting(self) -> list[dict]:
+        """The tool schemas count toward the prompt, so A3 must include its two
+        extra tools or every threshold is computed against the wrong budget."""
+        return [BASH_TOOL, *MEM_TOOLS] if self.memory_policy == "acm" else [BASH_TOOL]
 
     def _projected(self, messages: list[dict]) -> int:
         """count + output reservation = a conservative upper bound on the next
@@ -400,10 +530,12 @@ class MemoryAgent(DefaultAgent):
         outputs = []
         for action in message.get("extra", {}).get("actions", []):
             cmd = (action.get("command") or "").strip()
-            if cmd == "manage_context":
+            tool = action.get("mem_tool")          # set when it arrived as a real tool call
+            args = action.get("mem_args") or {}
+            if tool == "manage_context" or cmd == "manage_context":
                 outputs.append(self._handle_manage_context())
-            elif cmd.startswith("query_memory"):
-                outputs.append(self._handle_query_memory(cmd))
+            elif tool == "query_memory" or cmd.startswith("query_memory"):
+                outputs.append(self._handle_query_memory(cmd, args))
             else:
                 out = self.env.execute(action)
                 out = dict(out)
@@ -434,19 +566,50 @@ class MemoryAgent(DefaultAgent):
         return self._obs(f"[summary_id: {edit['summary_id']}] compressed {edit['n_compressed']} messages, "
                          f"freed ~{freed} tokens. Continue working.")
 
-    def _handle_query_memory(self, cmd: str) -> dict:
-        parts = cmd.split()
-        sid = None
-        for p in parts[1:]:
-            try:
-                sid = int(p.strip("[]#")); break
-            except ValueError:
-                continue
+    def _handle_query_memory(self, cmd: str, args: dict | None = None) -> dict:
+        """ACM loads summary_{N}.json and uses an LLM to extract only what the
+        query asks for. Dumping the whole archived span back into the context —
+        which an earlier build did — defeats the purpose: it re-inflates the very
+        context the compression freed."""
+        args = args or {}
+        sid, query = args.get("summary_id"), (args.get("query") or "").strip()
+        if sid is None:  # legacy bash form: "query_memory <id> [query...]"
+            parts = cmd.split()
+            for tok in parts[1:]:
+                try:
+                    sid = int(tok.strip("[]#")); break
+                except ValueError:
+                    continue
+            query = query or " ".join(parts[2:])
+        try:
+            sid = int(sid)
+        except (TypeError, ValueError):
+            return self._obs("query_memory: summary_id must be an integer.", returncode=1)
         entry = next((a for a in self.archive if a["summary_id"] == sid), None)
         if entry is None:
-            return self._obs(f"query_memory: no summary_id={sid}.", returncode=1)
-        dump = "\n\n".join(f"[{m.get('role')}]\n{str(m.get('content',''))}" for m in entry["messages"])
-        return self._obs(f"Retrieved original messages for summary_id={sid}:\n{dump}")
+            have = sorted(a["summary_id"] for a in self.archive)
+            return self._obs(f"query_memory: no summary_id={sid} (have {have}).", returncode=1)
+        if not query:
+            return self._obs("query_memory: a query is required.", returncode=1)
+        convo = "\n\n".join(f"[{m.get('role')}]\n{str(m.get('content',''))}" for m in entry["messages"])
+        try:
+            kwargs = dict(self.model.config.model_kwargs)
+            kwargs.pop("parallel_tool_calls", None)
+            resp = litellm.completion(
+                model=self.model.config.model_name,
+                messages=[
+                    {"role": "system", "content": RETRIEVAL_SYSTEM},
+                    {"role": "user", "content": f"Archived messages (summary_id {sid}):\n\n{convo}"
+                                                f"\n\nExtract only what answers: {query}"},
+                ],
+                **kwargs,  # NB: no tools — plain completion
+            )
+            found = (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            self.logger.warning(f"query_memory extraction failed: {e}")
+            found = f"(retrieval unavailable: {e})"
+        self.n_retrievals += 1
+        return self._obs(f"[summary_id: {sid}] retrieved for \"{query}\":\n{found}")
 
     # ── per-turn telemetry ──────────────────────────────────────────────
     def step(self) -> list[dict]:
@@ -474,6 +637,7 @@ class MemoryAgent(DefaultAgent):
             "summarize_at": self.summarize_at,
             "keep_last_k": self.keep_last_k,
             "n_edits": len(edits),
+            "n_retrievals": self.n_retrievals,
             "peak_ctx_tokens": max(ctx),
             "avg_ctx_tokens": sum(ctx) // len(ctx),
             "final_ctx_tokens": ctx[-1],
