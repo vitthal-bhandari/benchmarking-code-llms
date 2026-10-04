@@ -125,7 +125,7 @@ RESET_FRAC = 0.90
 #   STOP   when within STOP_RESERVE  of the wall
 # This is a documented deviation forced by the small-window regime, not a change
 # to ACM's semantics.
-NUDGE_RESERVE = 4000
+NUDGE_RESERVE = 3000
 STOP_RESERVE = 1000
 
 # ACM's escalation after the compress nudges are exhausted: rather than letting
