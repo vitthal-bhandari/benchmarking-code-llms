@@ -395,20 +395,20 @@ def main():
     ids = [i for i in ids if i in specs]
 
     if args.prefetch_only:
-        log(f">>> PREFETCH: warming the Apptainer cache with {len(ids)} images, "
+        log(f">>> PREFETCH: building {len(ids)} images into {args.sif_dir}, "
             f"{args.workers} workers (no scoring)")
         Path(args.sif_dir).mkdir(parents=True, exist_ok=True)
         ok = fail = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {
                 ex.submit(pull_image, specs[iid].image,
-                          Path(args.sif_dir) / f"prefetch_{iid}.sif"): iid
+                          Path(args.sif_dir) / sif_name(specs[iid].image)): iid
                 for iid in ids
             }
             for fut in concurrent.futures.as_completed(futs):
                 iid = futs[fut]
                 success, _ = fut.result()
-                (Path(args.sif_dir) / f"prefetch_{iid}.sif").unlink(missing_ok=True)
+                pass  # keep the .sif: the scorer reuses it and pulls nothing
                 if success:
                     ok += 1
                     log(f"[cached] {iid}")
