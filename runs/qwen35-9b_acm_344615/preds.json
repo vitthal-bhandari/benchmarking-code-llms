@@ -1,0 +1,497 @@
+{
+  "astropy__astropy-12907": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-12907",
+    "model_patch": "diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py\nindex a308e2729..45bea3608 100755\n--- a/astropy/modeling/separable.py\n+++ b/astropy/modeling/separable.py\n@@ -242,7 +242,7 @@ def _cstack(left, right):\n         cright = _coord_matrix(right, 'right', noutp)\n     else:\n         cright = np.zeros((noutp, right.shape[1]))\n-        cright[-right.shape[0]:, -right.shape[1]:] = 1\n+        cright[-right.shape[0]:, -right.shape[1]:] = right\n \n     return np.hstack([cleft, cright])\n \n"
+  },
+  "astropy__astropy-13977": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-13977",
+    "model_patch": "diff --git a/astropy/units/quantity.py b/astropy/units/quantity.py\nindex b98abfafb..a5cab7b3f 100644\n--- a/astropy/units/quantity.py\n+++ b/astropy/units/quantity.py\n@@ -667,7 +667,13 @@ class Quantity(np.ndarray):\n         arrays = []\n         for input_, converter in zip(inputs, converters):\n             input_ = getattr(input_, \"value\", input_)\n-            arrays.append(converter(input_) if converter else input_)\n+            try:\n+                arrays.append(converter(input_) if converter else input_)\n+            except (ValueError, TypeError):\n+                # If conversion fails, return NotImplemented to allow for\n+                # reflection (e.g., when another operand's __array_ufunc__\n+                # can handle the operation).\n+                return NotImplemented\n \n         # Call our superclass's __array_ufunc__\n         result = super().__array_ufunc__(function, method, *arrays, **kwargs)\n"
+  },
+  "astropy__astropy-13236": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-13236",
+    "model_patch": "diff --git a/astropy/table/table.py b/astropy/table/table.py\nindex 5afe2127a..0bf027620 100644\n--- a/astropy/table/table.py\n+++ b/astropy/table/table.py\n@@ -1240,9 +1240,18 @@ class Table:\n                                 'did not return a valid mixin column')\n \n         # Structured ndarray gets viewed as a mixin unless already a valid\n-        # mixin class\n+        # mixin class.\n+        # In version 5.2, this will be removed and structured arrays will be added as\n+        # Column objects instead. For now, a FutureWarning is issued suggesting users\n+        # to wrap the data in a Column explicitly.\n         if (not isinstance(data, Column) and not data_is_mixin\n                 and isinstance(data, np.ndarray) and len(data.dtype) > 1):\n+            warnings.warn(\n+                \"Structured ndarrays will be added to a Table as Column objects in \" +\n+                \"Astropy 5.2. For now, wrap the data in a Column explicitly to \" +\n+                \"avoid this warning.\",\n+                FutureWarning\n+            )\n             data = data.view(NdarrayMixin)\n             data_is_mixin = True\n \n\ndiff --git a/docs/changes/table/12860.bugfix.rst b/docs/changes/table/12860.bugfix.rst\nnew file mode 100644\nindex 000000000..d7c5e0f6d\n--- /dev/null\n+++ b/docs/changes/table/12860.bugfix.rst\n@@ -0,0 +1,4 @@\n+Structured arrays added to a Table now issue a ``FutureWarning`` suggesting\n+to wrap the data in a ``Column`` explicitly. This will be removed in version\n+5.2, when structured arrays will be added as ``Column`` objects instead of\n+being automatically converted to ``NdarrayMixin`` objects.\n"
+  },
+  "astropy__astropy-14309": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-14309",
+    "model_patch": "diff --git a/astropy/io/fits/connect.py b/astropy/io/fits/connect.py\nindex 4b6150f4a..a80d41c61 100644\n--- a/astropy/io/fits/connect.py\n+++ b/astropy/io/fits/connect.py\n@@ -69,7 +69,10 @@ def is_fits(origin, filepath, fileobj, *args, **kwargs):\n             (\".fits\", \".fits.gz\", \".fit\", \".fit.gz\", \".fts\", \".fts.gz\")\n         ):\n             return True\n-    return isinstance(args[0], (HDUList, TableHDU, BinTableHDU, GroupsHDU))\n+    elif args:\n+        return isinstance(args[0], (HDUList, TableHDU, BinTableHDU, GroupsHDU))\n+    else:\n+        return False\n \n \n def _decode_mixins(tbl):\ndiff --git a/astropy/io/misc/hdf5.py b/astropy/io/misc/hdf5.py\nindex 13e86bd5f..f4c96521a 100644\n--- a/astropy/io/misc/hdf5.py\n+++ b/astropy/io/misc/hdf5.py\n@@ -57,7 +57,10 @@ def is_hdf5(origin, filepath, fileobj, *args, **kwargs):\n     except ImportError:\n         return False\n     else:\n-        return isinstance(args[0], (h5py.File, h5py.Group, h5py.Dataset))\n+        if args:\n+            return isinstance(args[0], (h5py.File, h5py.Group, h5py.Dataset))\n+        else:\n+            return False\n \n \n def read_table_hdf5(input, path=None, character_as_bytes=True):\ndiff --git a/astropy/io/votable/connect.py b/astropy/io/votable/connect.py\nindex 86f48f6cc..b5ffdf041 100644\n--- a/astropy/io/votable/connect.py\n+++ b/astropy/io/votable/connect.py\n@@ -39,7 +39,10 @@ def is_votable(origin, filepath, fileobj, *args, **kwargs):\n             return result\n         elif filepath is not None:\n             return is_votable(filepath)\n-        return isinstance(args[0], (VOTableFile, VOTable))\n+        elif args:\n+            return isinstance(args[0], (VOTableFile, VOTable))\n+        else:\n+            return False\n \n     else:\n         return False\n"
+  },
+  "astropy__astropy-13453": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-13453",
+    "model_patch": ""
+  },
+  "astropy__astropy-14182": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-14182",
+    "model_patch": ""
+  },
+  "astropy__astropy-13033": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-13033",
+    "model_patch": ""
+  },
+  "astropy__astropy-14365": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-14365",
+    "model_patch": "diff --git a/astropy/io/ascii/qdp.py b/astropy/io/ascii/qdp.py\nindex 83a4f004a..7e3d7289f 100755\n--- a/astropy/io/ascii/qdp.py\n+++ b/astropy/io/ascii/qdp.py\n@@ -34,6 +34,9 @@ def _line_type(line, delimiter=None):\n     --------\n     >>> _line_type(\"READ SERR 3\")\n     'command'\n+    >>> _line_type(\"read serr 3\")\n+    'command'\n+\n     >>> _line_type(\" \\\\n    !some gibberish\")\n     'comment'\n     >>> _line_type(\"   \")\n@@ -68,7 +71,7 @@ def _line_type(line, delimiter=None):\n     _new_re = rf\"NO({sep}NO)+\"\n     _data_re = rf\"({_decimal_re}|NO|[-+]?nan)({sep}({_decimal_re}|NO|[-+]?nan))*)\"\n     _type_re = rf\"^\\s*((?P<command>{_command_re})|(?P<new>{_new_re})|(?P<data>{_data_re})?\\s*(\\!(?P<comment>.*))?\\s*$\"\n-    _line_type_re = re.compile(_type_re)\n+    _line_type_re = re.compile(_type_re, re.IGNORECASE)\n     line = line.strip()\n     if not line:\n         return \"comment\"\n"
+  },
+  "astropy__astropy-14369": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-14369",
+    "model_patch": "diff --git a/astropy/units/format/cds.py b/astropy/units/format/cds.py\nindex 307e987ed..57812cd9a 100644\n--- a/astropy/units/format/cds.py\n+++ b/astropy/units/format/cds.py\n@@ -181,13 +181,19 @@ class CDS(Base):\n \n         def p_division_of_units(p):\n             \"\"\"\n-            division_of_units : DIVISION unit_expression\n-                              | unit_expression DIVISION combined_units\n+            division_of_units : unit_expression DIVISION unit_expression\n+                              | division_of_units DIVISION unit_expression\n+                              | DIVISION unit_expression\n             \"\"\"\n-            if len(p) == 3:\n-                p[0] = p[2] ** -1\n-            else:\n+            if len(p) == 4:\n+                # unit_expression DIVISION unit_expression\n                 p[0] = p[1] / p[3]\n+            elif len(p) == 5:\n+                # division_of_units DIVISION unit_expression\n+                p[0] = p[1] / p[3]\n+            elif len(p) == 3:\n+                # DIVISION unit_expression\n+                p[0] = p[2] ** -1\n \n         def p_unit_expression(p):\n             \"\"\"\ndiff --git a/astropy/units/format/cds_parsetab.py b/astropy/units/format/cds_parsetab.py\nindex 741d41643..ab67a47d5 100644\n--- a/astropy/units/format/cds_parsetab.py\n+++ b/astropy/units/format/cds_parsetab.py\n@@ -17,9 +17,9 @@ _tabversion = '3.10'\n \n _lr_method = 'LALR'\n \n-_lr_signature = 'CLOSE_BRACKET CLOSE_PAREN DIMENSIONLESS DIVISION OPEN_BRACKET OPEN_PAREN PRODUCT SIGN UFLOAT UINT UNIT X\\n            main : factor combined_units\\n                 | combined_units\\n                 | DIMENSIONLESS\\n                 | OPEN_BRACKET combined_units CLOSE_BRACKET\\n                 | OPEN_BRACKET DIMENSIONLESS CLOSE_BRACKET\\n                 | factor\\n            \\n            combined_units : product_of_units\\n                           | division_of_units\\n            \\n            product_of_units : unit_expression PRODUCT combined_units\\n                             | unit_expression\\n            \\n            division_of_units : DIVISION unit_expression\\n                              | unit_expression DIVISION combined_units\\n            \\n            unit_expression : unit_with_power\\n                            | OPEN_PAREN combined_units CLOSE_PAREN\\n            \\n            factor : signed_float X UINT signed_int\\n                   | UINT X UINT signed_int\\n                   | UINT signed_int\\n                   | UINT\\n                   | signed_float\\n            \\n            unit_with_power : UNIT numeric_power\\n                            | UNIT\\n            \\n            numeric_power : sign UINT\\n            \\n            sign : SIGN\\n                 |\\n            \\n            signed_int : SIGN UINT\\n            \\n            signed_float : sign UINT\\n                         | sign UFLOAT\\n            '\n+_lr_signature = 'CLOSE_BRACKET CLOSE_PAREN DIMENSIONLESS DIVISION OPEN_BRACKET OPEN_PAREN PRODUCT SIGN UFLOAT UINT UNIT X\\n            main : factor combined_units\\n                 | combined_units\\n                 | DIMENSIONLESS\\n                 | OPEN_BRACKET combined_units CLOSE_BRACKET\\n                 | OPEN_BRACKET DIMENSIONLESS CLOSE_BRACKET\\n                 | factor\\n            \\n            combined_units : product_of_units\\n                           | division_of_units\\n            \\n            product_of_units : unit_expression PRODUCT combined_units\\n                             | unit_expression\\n            \\n            division_of_units : unit_expression DIVISION unit_expression\\n                              | division_of_units DIVISION unit_expression\\n                              | DIVISION unit_expression\\n            \\n            unit_expression : unit_with_power\\n                            | OPEN_PAREN combined_units CLOSE_PAREN\\n            \\n            factor : signed_float X UINT signed_int\\n                   | UINT X UINT signed_int\\n                   | UINT signed_int\\n                   | UINT\\n                   | signed_float\\n            \\n            unit_with_power : UNIT numeric_power\\n                            | UNIT\\n            \\n            numeric_power : sign UINT\\n            \\n            sign : SIGN\\n                 |\\n            \\n            signed_int : SIGN UINT\\n            \\n            signed_float : sign UINT\\n                         | sign UFLOAT\\n            '\n     \n-_lr_action_items = {'DIMENSIONLESS':([0,5,],[4,19,]),'OPEN_BRACKET':([0,],[5,]),'UINT':([0,10,13,16,20,21,23,31,],[7,24,-23,-24,34,35,36,40,]),'DIVISION':([0,2,5,6,7,11,14,15,16,22,24,25,26,27,30,36,39,40,41,42,],[12,12,12,-19,-18,27,-13,12,-21,-17,-26,-27,12,12,-20,-25,-14,-22,-15,-16,]),'SIGN':([0,7,16,34,35,],[13,23,13,23,23,]),'UFLOAT':([0,10,13,],[-24,25,-23,]),'OPEN_PAREN':([0,2,5,6,7,12,15,22,24,25,26,27,36,41,42,],[15,15,15,-19,-18,15,15,-17,-26,-27,15,15,-25,-15,-16,]),'UNIT':([0,2,5,6,7,12,15,22,24,25,26,27,36,41,42,],[16,16,16,-19,-18,16,16,-17,-26,-27,16,16,-25,-15,-16,]),'$end':([1,2,3,4,6,7,8,9,11,14,16,17,22,24,25,28,30,32,33,36,37,38,39,40,41,42,],[0,-6,-2,-3,-19,-18,-7,-8,-10,-13,-21,-1,-17,-26,-27,-11,-20,-4,-5,-25,-9,-12,-14,-22,-15,-16,]),'X':([6,7,24,25,],[20,21,-26,-27,]),'CLOSE_BRACKET':([8,9,11,14,16,18,19,28,30,37,38,39,40,],[-7,-8,-10,-13,-21,32,33,-11,-20,-9,-12,-14,-22,]),'CLOSE_PAREN':([8,9,11,14,16,28,29,30,37,38,39,40,],[-7,-8,-10,-13,-21,-11,39,-20,-9,-12,-14,-22,]),'PRODUCT':([11,14,16,30,39,40,],[26,-13,-21,-20,-14,-22,]),}\n+_lr_action_items = {'DIMENSIONLESS':([0,5,],[4,19,]),'OPEN_BRACKET':([0,],[5,]),'UINT':([0,10,13,16,20,21,23,32,],[7,25,-24,-25,35,36,37,42,]),'DIVISION':([0,2,5,6,7,9,11,14,15,16,22,25,26,27,29,31,37,38,40,41,42,43,44,],[12,12,12,-20,-19,24,28,-14,12,-22,-18,-27,-28,12,-13,-21,-26,-12,-11,-15,-23,-16,-17,]),'SIGN':([0,7,16,35,36,],[13,23,13,23,23,]),'UFLOAT':([0,10,13,],[-25,26,-24,]),'OPEN_PAREN':([0,2,5,6,7,12,15,22,24,25,26,27,28,37,43,44,],[15,15,15,-20,-19,15,15,-18,15,-27,-28,15,15,-26,-16,-17,]),'UNIT':([0,2,5,6,7,12,15,22,24,25,26,27,28,37,43,44,],[16,16,16,-20,-19,16,16,-18,16,-27,-28,16,16,-26,-16,-17,]),'$end':([1,2,3,4,6,7,8,9,11,14,16,17,22,25,26,29,31,33,34,37,38,39,40,41,42,43,44,],[0,-6,-2,-3,-20,-19,-7,-8,-10,-14,-22,-1,-18,-27,-28,-13,-21,-4,-5,-26,-12,-9,-11,-15,-23,-16,-17,]),'X':([6,7,25,26,],[20,21,-27,-28,]),'CLOSE_BRACKET':([8,9,11,14,16,18,19,29,31,38,39,40,41,42,],[-7,-8,-10,-14,-22,33,34,-13,-21,-12,-9,-11,-15,-23,]),'CLOSE_PAREN':([8,9,11,14,16,29,30,31,38,39,40,41,42,],[-7,-8,-10,-14,-22,-13,41,-21,-12,-9,-11,-15,-23,]),'PRODUCT':([11,14,16,31,41,42,],[27,-14,-22,-21,-15,-23,]),}\n \n _lr_action = {}\n for _k, _v in _lr_action_items.items():\n@@ -28,7 +28,7 @@ for _k, _v in _lr_action_items.items():\n       _lr_action[_x][_k] = _y\n del _lr_action_items\n \n-_lr_goto_items = {'main':([0,],[1,]),'factor':([0,],[2,]),'combined_units':([0,2,5,15,26,27,],[3,17,18,29,37,38,]),'signed_float':([0,],[6,]),'product_of_units':([0,2,5,15,26,27,],[8,8,8,8,8,8,]),'division_of_units':([0,2,5,15,26,27,],[9,9,9,9,9,9,]),'sign':([0,16,],[10,31,]),'unit_expression':([0,2,5,12,15,26,27,],[11,11,11,28,11,11,11,]),'unit_with_power':([0,2,5,12,15,26,27,],[14,14,14,14,14,14,14,]),'signed_int':([7,34,35,],[22,41,42,]),'numeric_power':([16,],[30,]),}\n+_lr_goto_items = {'main':([0,],[1,]),'factor':([0,],[2,]),'combined_units':([0,2,5,15,27,],[3,17,18,30,39,]),'signed_float':([0,],[6,]),'product_of_units':([0,2,5,15,27,],[8,8,8,8,8,]),'division_of_units':([0,2,5,15,27,],[9,9,9,9,9,]),'sign':([0,16,],[10,32,]),'unit_expression':([0,2,5,12,15,24,27,28,],[11,11,11,29,11,38,11,40,]),'unit_with_power':([0,2,5,12,15,24,27,28,],[14,14,14,14,14,14,14,14,]),'signed_int':([7,35,36,],[22,43,44,]),'numeric_power':([16,],[31,]),}\n \n _lr_goto = {}\n for _k, _v in _lr_goto_items.items():\n@@ -38,31 +38,32 @@ for _k, _v in _lr_goto_items.items():\n del _lr_goto_items\n _lr_productions = [\n   (\"S' -> main\",\"S'\",1,None,None,None),\n-  ('main -> factor combined_units','main',2,'p_main','cds.py',156),\n-  ('main -> combined_units','main',1,'p_main','cds.py',157),\n-  ('main -> DIMENSIONLESS','main',1,'p_main','cds.py',158),\n-  ('main -> OPEN_BRACKET combined_units CLOSE_BRACKET','main',3,'p_main','cds.py',159),\n-  ('main -> OPEN_BRACKET DIMENSIONLESS CLOSE_BRACKET','main',3,'p_main','cds.py',160),\n-  ('main -> factor','main',1,'p_main','cds.py',161),\n-  ('combined_units -> product_of_units','combined_units',1,'p_combined_units','cds.py',174),\n-  ('combined_units -> division_of_units','combined_units',1,'p_combined_units','cds.py',175),\n-  ('product_of_units -> unit_expression PRODUCT combined_units','product_of_units',3,'p_product_of_units','cds.py',181),\n-  ('product_of_units -> unit_expression','product_of_units',1,'p_product_of_units','cds.py',182),\n-  ('division_of_units -> DIVISION unit_expression','division_of_units',2,'p_division_of_units','cds.py',191),\n-  ('division_of_units -> unit_expression DIVISION combined_units','division_of_units',3,'p_division_of_units','cds.py',192),\n-  ('unit_expression -> unit_with_power','unit_expression',1,'p_unit_expression','cds.py',201),\n-  ('unit_expression -> OPEN_PAREN combined_units CLOSE_PAREN','unit_expression',3,'p_unit_expression','cds.py',202),\n-  ('factor -> signed_float X UINT signed_int','factor',4,'p_factor','cds.py',211),\n-  ('factor -> UINT X UINT signed_int','factor',4,'p_factor','cds.py',212),\n-  ('factor -> UINT signed_int','factor',2,'p_factor','cds.py',213),\n-  ('factor -> UINT','factor',1,'p_factor','cds.py',214),\n-  ('factor -> signed_float','factor',1,'p_factor','cds.py',215),\n-  ('unit_with_power -> UNIT numeric_power','unit_with_power',2,'p_unit_with_power','cds.py',232),\n-  ('unit_with_power -> UNIT','unit_with_power',1,'p_unit_with_power','cds.py',233),\n-  ('numeric_power -> sign UINT','numeric_power',2,'p_numeric_power','cds.py',242),\n-  ('sign -> SIGN','sign',1,'p_sign','cds.py',248),\n-  ('sign -> <empty>','sign',0,'p_sign','cds.py',249),\n-  ('signed_int -> SIGN UINT','signed_int',2,'p_signed_int','cds.py',258),\n-  ('signed_float -> sign UINT','signed_float',2,'p_signed_float','cds.py',264),\n-  ('signed_float -> sign UFLOAT','signed_float',2,'p_signed_float','cds.py',265),\n+  ('main -> factor combined_units','main',2,'p_main','cds.py',148),\n+  ('main -> combined_units','main',1,'p_main','cds.py',149),\n+  ('main -> DIMENSIONLESS','main',1,'p_main','cds.py',150),\n+  ('main -> OPEN_BRACKET combined_units CLOSE_BRACKET','main',3,'p_main','cds.py',151),\n+  ('main -> OPEN_BRACKET DIMENSIONLESS CLOSE_BRACKET','main',3,'p_main','cds.py',152),\n+  ('main -> factor','main',1,'p_main','cds.py',153),\n+  ('combined_units -> product_of_units','combined_units',1,'p_combined_units','cds.py',167),\n+  ('combined_units -> division_of_units','combined_units',1,'p_combined_units','cds.py',168),\n+  ('product_of_units -> unit_expression PRODUCT combined_units','product_of_units',3,'p_product_of_units','cds.py',174),\n+  ('product_of_units -> unit_expression','product_of_units',1,'p_product_of_units','cds.py',175),\n+  ('division_of_units -> unit_expression DIVISION unit_expression','division_of_units',3,'p_division_of_units','cds.py',184),\n+  ('division_of_units -> division_of_units DIVISION unit_expression','division_of_units',3,'p_division_of_units','cds.py',185),\n+  ('division_of_units -> DIVISION unit_expression','division_of_units',2,'p_division_of_units','cds.py',186),\n+  ('unit_expression -> unit_with_power','unit_expression',1,'p_unit_expression','cds.py',200),\n+  ('unit_expression -> OPEN_PAREN combined_units CLOSE_PAREN','unit_expression',3,'p_unit_expression','cds.py',201),\n+  ('factor -> signed_float X UINT signed_int','factor',4,'p_factor','cds.py',210),\n+  ('factor -> UINT X UINT signed_int','factor',4,'p_factor','cds.py',211),\n+  ('factor -> UINT signed_int','factor',2,'p_factor','cds.py',212),\n+  ('factor -> UINT','factor',1,'p_factor','cds.py',213),\n+  ('factor -> signed_float','factor',1,'p_factor','cds.py',214),\n+  ('unit_with_power -> UNIT numeric_power','unit_with_power',2,'p_unit_with_power','cds.py',229),\n+  ('unit_with_power -> UNIT','unit_with_power',1,'p_unit_with_power','cds.py',230),\n+  ('numeric_power -> sign UINT','numeric_power',2,'p_numeric_power','cds.py',239),\n+  ('sign -> SIGN','sign',1,'p_sign','cds.py',245),\n+  ('sign -> <empty>','sign',0,'p_sign','cds.py',246),\n+  ('signed_int -> SIGN UINT','signed_int',2,'p_signed_int','cds.py',255),\n+  ('signed_float -> sign UINT','signed_float',2,'p_signed_float','cds.py',261),\n+  ('signed_float -> sign UFLOAT','signed_float',2,'p_signed_float','cds.py',262),\n ]\n"
+  },
+  "astropy__astropy-14508": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-14508",
+    "model_patch": "diff --git a/astropy/io/fits/card.py b/astropy/io/fits/card.py\nindex 118bfced8..a1b407c2d 100644\n--- a/astropy/io/fits/card.py\n+++ b/astropy/io/fits/card.py\n@@ -1299,32 +1299,65 @@ def _format_value(value):\n \n def _format_float(value):\n     \"\"\"Format a floating number to make sure it gets the decimal point.\"\"\"\n-    value_str = f\"{value:.16G}\"\n-    if \".\" not in value_str and \"E\" not in value_str:\n+    # First try using str(value) as it's usually shorter and more accurate\n+    # for representing the value. Only fall back to .16G format if str(value)\n+    # is too long (more than 20 characters).\n+    value_str = str(value)\n+    \n+    # If str(value) doesn't have a decimal point AND doesn't have scientific notation,\n+    # we need to add one. This can happen for whole numbers like 1.0\n+    if \".\" not in value_str and \"E\" not in value_str and \"e\" not in value_str:\n         value_str += \".0\"\n-    elif \"E\" in value_str:\n-        # On some Windows builds of Python (and possibly other platforms?) the\n-        # exponent is zero-padded out to, it seems, three digits.  Normalize\n-        # the format to pad only to two digits.\n-        significand, exponent = value_str.split(\"E\")\n-        if exponent[0] in (\"+\", \"-\"):\n-            sign = exponent[0]\n-            exponent = exponent[1:]\n-        else:\n-            sign = \"\"\n-        value_str = f\"{significand}E{sign}{int(exponent):02d}\"\n-\n+    elif \"E\" in value_str or \"e\" in value_str:\n+        # Normalize exponent format to have only 2 digits\n+        # Handle both uppercase and lowercase E\n+        upper_value_str = value_str.upper()\n+        if \"E\" in upper_value_str:\n+            significand, exponent = upper_value_str.split(\"E\")\n+            if exponent[0] in (\"+\", \"-\"):\n+                sign = exponent[0]\n+                exponent = exponent[1:]\n+            else:\n+                sign = \"\"\n+            # Convert to lowercase E if original was lowercase\n+            if \"e\" in value_str:\n+                value_str = f\"{significand}e{sign}{int(exponent):02d}\"\n+            else:\n+                value_str = f\"{significand}E{sign}{int(exponent):02d}\"\n+    \n     # Limit the value string to at most 20 characters.\n     str_len = len(value_str)\n-\n+    \n     if str_len > 20:\n-        idx = value_str.find(\"E\")\n-\n-        if idx < 0:\n-            value_str = value_str[:20]\n-        else:\n-            value_str = value_str[: 20 - (str_len - idx)] + value_str[idx:]\n-\n+        # Fall back to .16G format if str(value) is too long\n+        value_str = f\"{value:.16G}\"\n+        if \".\" not in value_str and \"E\" not in value_str and \"e\" not in value_str:\n+            value_str += \".0\"\n+        elif \"E\" in value_str or \"e\" in value_str:\n+            # Normalize exponent format\n+            upper_value_str = value_str.upper()\n+            if \"E\" in upper_value_str:\n+                significand, exponent = upper_value_str.split(\"E\")\n+                if exponent[0] in (\"+\", \"-\"):\n+                    sign = exponent[0]\n+                    exponent = exponent[1:]\n+                else:\n+                    sign = \"\"\n+                # Convert to lowercase E if original was lowercase\n+                if \"e\" in value_str:\n+                    value_str = f\"{significand}e{sign}{int(exponent):02d}\"\n+                else:\n+                    value_str = f\"{significand}E{sign}{int(exponent):02d}\"\n+        \n+        # Limit to 20 chars\n+        str_len = len(value_str)\n+        if str_len > 20:\n+            idx = value_str.find(\"E\") if \"E\" in value_str else value_str.find(\"e\")\n+            if idx < 0:\n+                value_str = value_str[:20]\n+            else:\n+                value_str = value_str[: 20 - (str_len - idx)] + value_str[idx:]\n+    \n     return value_str\n \n \n"
+  },
+  "astropy__astropy-14995": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-14995",
+    "model_patch": "diff --git a/astropy/nddata/mixins/ndarithmetic.py b/astropy/nddata/mixins/ndarithmetic.py\nindex 4153dfccb..c1a899d33 100755\n--- a/astropy/nddata/mixins/ndarithmetic.py\n+++ b/astropy/nddata/mixins/ndarithmetic.py\n@@ -514,7 +514,7 @@ class NDArithmeticMixin:\n         \"\"\"\n         # If only one mask is present we need not bother about any type checks\n         if (\n-            self.mask is None and operand is not None and operand.mask is None\n+            self.mask is None and operand is not None and getattr(operand, \"mask\", None) is None\n         ) or handle_mask is None:\n             return None\n         elif self.mask is None and operand is not None:\n@@ -522,6 +522,9 @@ class NDArithmeticMixin:\n             return deepcopy(operand.mask)\n         elif operand is None:\n             return deepcopy(self.mask)\n+        elif getattr(operand, \"mask\", None) is None:\n+            # operand.mask is None, return self.mask\n+            return deepcopy(self.mask)\n         else:\n             # Now lets calculate the resulting mask (operation enforces copy)\n             return handle_mask(self.mask, operand.mask, **kwds)\n"
+  },
+  "astropy__astropy-7166": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-7166",
+    "model_patch": "diff --git a/astropy/utils/misc.py b/astropy/utils/misc.py\nindex de3fb01d1..e8ec77ac7 100644\n--- a/astropy/utils/misc.py\n+++ b/astropy/utils/misc.py\n@@ -528,13 +528,24 @@ class InheritDocstrings(type):\n                 not key.startswith('_'))\n \n         for key, val in dct.items():\n-            if (inspect.isfunction(val) and\n+            if ((inspect.isfunction(val) or\n+                 inspect.ismethod(val) or\n+                 isinstance(val, (property, staticmethod, classmethod))) and\n                 is_public_member(key) and\n                 val.__doc__ is None):\n                 for base in cls.__mro__[1:]:\n                     super_method = getattr(base, key, None)\n                     if super_method is not None:\n-                        val.__doc__ = super_method.__doc__\n+                        # For property, staticmethod, and classmethod, we need to set\n+                        # the docstring on the appropriate attribute\n+                        if isinstance(val, property):\n+                            val.__doc__ = super_method.__doc__\n+                        elif isinstance(val, staticmethod):\n+                            val.__func__.__doc__ = super_method.__doc__\n+                        elif isinstance(val, classmethod):\n+                            val.__func__.__doc__ = super_method.__doc__\n+                        else:\n+                            val.__doc__ = super_method.__doc__\n                         break\n \n         super().__init__(name, bases, dct)\n"
+  },
+  "astropy__astropy-7606": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-7606",
+    "model_patch": "diff --git a/astropy/units/core.py b/astropy/units/core.py\nindex e9bd986d3..1b202395e 100644\n--- a/astropy/units/core.py\n+++ b/astropy/units/core.py\n@@ -1710,6 +1710,8 @@ class UnrecognizedUnit(IrreducibleUnit):\n         _unrecognized_operator\n \n     def __eq__(self, other):\n+        if other is None:\n+            return False\n         other = Unit(other, parse_strict='silent')\n         return isinstance(other, UnrecognizedUnit) and self.name == other.name\n \n"
+  },
+  "astropy__astropy-7336": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-7336",
+    "model_patch": "diff --git a/astropy/units/decorators.py b/astropy/units/decorators.py\nindex 8bece5a85..980a15d46 100644\n--- a/astropy/units/decorators.py\n+++ b/astropy/units/decorators.py\n@@ -221,7 +221,10 @@ class QuantityInput:\n             with add_enabled_equivalencies(self.equivalencies):\n                 return_ = wrapped_function(*func_args, **func_kwargs)\n             if wrapped_signature.return_annotation is not inspect.Signature.empty:\n-                return return_.to(wrapped_signature.return_annotation)\n+                if wrapped_signature.return_annotation is not None:\n+                    return return_.to(wrapped_signature.return_annotation)\n+                else:\n+                    return return_\n             else:\n                 return return_\n \n"
+  },
+  "astropy__astropy-7671": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-7671",
+    "model_patch": "diff --git a/astropy/utils/introspection.py b/astropy/utils/introspection.py\nindex 3e784f9fc..2c5e320f7 100644\n--- a/astropy/utils/introspection.py\n+++ b/astropy/utils/introspection.py\n@@ -6,7 +6,7 @@\n import inspect\n import types\n import importlib\n-from distutils.version import LooseVersion\n+from packaging.version import Version\n \n \n __all__ = ['resolve_name', 'minversion', 'find_current_module',\n@@ -140,9 +140,9 @@ def minversion(module, version, inclusive=True, version_path='__version__'):\n         have_version = resolve_name(module.__name__, version_path)\n \n     if inclusive:\n-        return LooseVersion(have_version) >= LooseVersion(version)\n+        return Version(have_version) >= Version(version)\n     else:\n-        return LooseVersion(have_version) > LooseVersion(version)\n+        return Version(have_version) > Version(version)\n \n \n def find_current_module(depth=1, finddiff=False):\n"
+  },
+  "astropy__astropy-14539": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-14539",
+    "model_patch": ""
+  },
+  "astropy__astropy-8707": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-8707",
+    "model_patch": "diff --git a/astropy/io/fits/card.py b/astropy/io/fits/card.py\nindex 8c1ac5d73..470b19bf0 100644\n--- a/astropy/io/fits/card.py\n+++ b/astropy/io/fits/card.py\n@@ -5,7 +5,7 @@ import warnings\n \n import numpy as np\n \n-from .util import _str_to_num, _is_int, translate, _words_group\n+from .util import _str_to_num, _is_int, translate, _words_group, decode_ascii\n from .verify import _Verify, _ErrList, VerifyError, VerifyWarning\n \n from . import conf\n@@ -553,6 +553,10 @@ class Card(_Verify):\n         card(s).\n         \"\"\"\n \n+        # Convert bytes to str if necessary\n+        if isinstance(image, bytes):\n+            image = decode_ascii(image)\n+\n         card = cls()\n         card._image = _pad(image)\n         card._verified = False\ndiff --git a/astropy/io/fits/header.py b/astropy/io/fits/header.py\nindex ad07e6d52..c33af3da0 100644\n--- a/astropy/io/fits/header.py\n+++ b/astropy/io/fits/header.py\n@@ -348,6 +348,10 @@ class Header:\n             A new `Header` instance.\n         \"\"\"\n \n+        # Convert bytes to str if necessary\n+        if isinstance(data, bytes):\n+            data = decode_ascii(data)\n+\n         cards = []\n \n         # If the card separator contains characters that may validly appear in\n"
+  },
+  "django__django-10097": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-10097",
+    "model_patch": ""
+  },
+  "django__django-10914": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-10914",
+    "model_patch": "diff --git a/django/conf/global_settings.py b/django/conf/global_settings.py\nindex acee9887d2..bdeec80610 100755\n--- a/django/conf/global_settings.py\n+++ b/django/conf/global_settings.py\n@@ -304,7 +304,7 @@ FILE_UPLOAD_TEMP_DIR = None\n \n # The numeric mode to set newly-uploaded files to. The value should be a mode\n # you'd pass directly to os.chmod; see https://docs.python.org/library/os.html#files-and-directories.\n-FILE_UPLOAD_PERMISSIONS = None\n+FILE_UPLOAD_PERMISSIONS = 0o644\n \n # The numeric mode to assign to newly-created directories, when uploading files.\n # The value should be a mode as you'd pass to os.chmod;\n"
+  },
+  "django__django-10554": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-10554",
+    "model_patch": ""
+  },
+  "astropy__astropy-13398": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-13398",
+    "model_patch": ""
+  },
+  "django__django-11066": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11066",
+    "model_patch": "diff --git a/django/contrib/contenttypes/management/__init__.py b/django/contrib/contenttypes/management/__init__.py\nindex 2b5f688136..563cba2fdf 100644\n--- a/django/contrib/contenttypes/management/__init__.py\n+++ b/django/contrib/contenttypes/management/__init__.py\n@@ -24,7 +24,7 @@ class RenameContentType(migrations.RunPython):\n             content_type.model = new_model\n             try:\n                 with transaction.atomic(using=db):\n-                    content_type.save(update_fields={'model'})\n+                    content_type.save(using=db, update_fields={'model'})\n             except IntegrityError:\n                 # Gracefully fallback if a stale content type causes a\n                 # conflict as remove_stale_contenttypes will take care of\n"
+  },
+  "django__django-10880": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-10880",
+    "model_patch": ""
+  },
+  "astropy__astropy-8872": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-8872",
+    "model_patch": ""
+  },
+  "django__django-10973": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-10973",
+    "model_patch": ""
+  },
+  "django__django-11099": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11099",
+    "model_patch": "diff --git a/django/contrib/auth/validators.py b/django/contrib/auth/validators.py\nindex b4878cfd45..1304f20a60 100755\n--- a/django/contrib/auth/validators.py\n+++ b/django/contrib/auth/validators.py\n@@ -7,7 +7,7 @@ from django.utils.translation import gettext_lazy as _\n \n @deconstructible\n class ASCIIUsernameValidator(validators.RegexValidator):\n-    regex = r'^[\\w.@+-]+$'\n+    regex = r'\\A[\\w.@+-]+\\Z'\n     message = _(\n         'Enter a valid username. This value may contain only English letters, '\n         'numbers, and @/./+/-/_ characters.'\n@@ -17,7 +17,7 @@ class ASCIIUsernameValidator(validators.RegexValidator):\n \n @deconstructible\n class UnicodeUsernameValidator(validators.RegexValidator):\n-    regex = r'^[\\w.@+-]+$'\n+    regex = r'\\A[\\w.@+-]+\\Z'\n     message = _(\n         'Enter a valid username. This value may contain only letters, '\n         'numbers, and @/./+/-/_ characters.'\n"
+  },
+  "django__django-11133": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11133",
+    "model_patch": "diff --git a/django/http/response.py b/django/http/response.py\nindex 6a84e193ba..22987713a0 100755\n--- a/django/http/response.py\n+++ b/django/http/response.py\n@@ -233,6 +233,9 @@ class HttpResponseBase:\n             return bytes(value)\n         if isinstance(value, str):\n             return bytes(value.encode(self.charset))\n+        # Handle memoryview objects.\n+        if isinstance(value, memoryview):\n+            return value.tobytes()\n         # Handle non-string types.\n         return str(value).encode(self.charset)\n \n@@ -309,7 +312,7 @@ class HttpResponse(HttpResponseBase):\n     @content.setter\n     def content(self, value):\n         # Consume iterators upon assignment to allow repeated iteration.\n-        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str)):\n+        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str, memoryview)):\n             content = b''.join(self.make_bytes(chunk) for chunk in value)\n             if hasattr(value, 'close'):\n                 try:\n"
+  },
+  "astropy__astropy-14598": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-14598",
+    "model_patch": ""
+  },
+  "django__django-11095": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11095",
+    "model_patch": ""
+  },
+  "django__django-11087": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11087",
+    "model_patch": ""
+  },
+  "django__django-11119": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11119",
+    "model_patch": ""
+  },
+  "django__django-11138": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11138",
+    "model_patch": ""
+  },
+  "django__django-11163": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11163",
+    "model_patch": "diff --git a/django/forms/models.py b/django/forms/models.py\nindex d157c291ef..fadac848d0 100644\n--- a/django/forms/models.py\n+++ b/django/forms/models.py\n@@ -83,7 +83,7 @@ def model_to_dict(instance, fields=None, exclude=None):\n     for f in chain(opts.concrete_fields, opts.private_fields, opts.many_to_many):\n         if not getattr(f, 'editable', False):\n             continue\n-        if fields and f.name not in fields:\n+        if fields is not None and f.name not in fields:\n             continue\n         if exclude and f.name in exclude:\n             continue\n@@ -431,7 +431,7 @@ class BaseModelForm(BaseForm):\n         for f in chain(opts.many_to_many, opts.private_fields):\n             if not hasattr(f, 'save_form_data'):\n                 continue\n-            if fields and f.name not in fields:\n+            if fields is not None and f.name not in fields:\n                 continue\n             if exclude and f.name in exclude:\n                 continue\n"
+  },
+  "django__django-11179": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11179",
+    "model_patch": "diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py\nindex 92fe4affb9..3a462f1c4c 100755\n--- a/django/db/models/deletion.py\n+++ b/django/db/models/deletion.py\n@@ -277,6 +277,7 @@ class Collector:\n             if self.can_fast_delete(instance):\n                 with transaction.mark_for_rollback_on_error():\n                     count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)\n+                setattr(instance, model._meta.pk.attname, None)\n                 return count, {model._meta.label: count}\n \n         with transaction.atomic(using=self.using, savepoint=False):\n"
+  },
+  "django__django-11239": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11239",
+    "model_patch": "diff --git a/django/db/backends/postgresql/client.py b/django/db/backends/postgresql/client.py\nindex cf4df76882..f31ac75e40 100644\n--- a/django/db/backends/postgresql/client.py\n+++ b/django/db/backends/postgresql/client.py\n@@ -17,6 +17,10 @@ class DatabaseClient(BaseDatabaseClient):\n         dbname = conn_params.get('database', '')\n         user = conn_params.get('user', '')\n         passwd = conn_params.get('password', '')\n+        sslmode = conn_params.get('sslmode', '')\n+        sslrootcert = conn_params.get('sslrootcert', '')\n+        sslcert = conn_params.get('sslcert', '')\n+        sslkey = conn_params.get('sslkey', '')\n \n         if user:\n             args += ['-U', user]\n@@ -24,6 +28,14 @@ class DatabaseClient(BaseDatabaseClient):\n             args += ['-h', host]\n         if port:\n             args += ['-p', str(port)]\n+        if sslmode:\n+            args += ['--sslmode', sslmode]\n+        if sslrootcert:\n+            args += ['--sslrootcert', sslrootcert]\n+        if sslcert:\n+            args += ['--sslcert', sslcert]\n+        if sslkey:\n+            args += ['--sslkey', sslkey]\n         args += [dbname]\n \n         sigint_handler = signal.getsignal(signal.SIGINT)\n"
+  },
+  "django__django-11141": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11141",
+    "model_patch": ""
+  },
+  "django__django-11149": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11149",
+    "model_patch": "diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py\nindex 880a2cc17b..775617c530 100644\n--- a/django/contrib/admin/options.py\n+++ b/django/contrib/admin/options.py\n@@ -2115,29 +2115,72 @@ class InlineModelAdmin(BaseModelAdmin):\n         if self.opts.auto_created:\n             # We're checking the rights to an auto-created intermediate model,\n             # which doesn't have its own individual permissions. The user needs\n-            # to have the view permission for the related model in order to\n-            # be able to do anything with the intermediate model.\n-            return self.has_view_permission(request, obj)\n+            # to have the add permission for the related model in order to\n+            # be able to add to the intermediate model.\n+            related_model_admin = self._get_related_model_admin(request, obj)\n+            if related_model_admin:\n+                return related_model_admin.has_add_permission(request)\n+            # If the related model doesn't have an admin, check permissions directly\n+            for field in self.opts.fields:\n+                if field.remote_field and field.remote_field.model != self.parent_model:\n+                    # User needs change permission to add to the M2M relationship\n+                    return request.user.has_perm(\n+                        '%s.%s' % (field.remote_field.model._meta.app_label,\n+                                   get_permission_codename('change', field.remote_field.model._meta))\n+                    )\n+            return False\n         return super().has_add_permission(request)\n \n     def has_change_permission(self, request, obj=None):\n         if self.opts.auto_created:\n             # We're checking the rights to an auto-created intermediate model,\n             # which doesn't have its own individual permissions. The user needs\n-            # to have the view permission for the related model in order to\n-            # be able to do anything with the intermediate model.\n-            return self.has_view_permission(request, obj)\n+            # to have the change permission for the related model in order to\n+            # be able to change the intermediate model.\n+            related_model_admin = self._get_related_model_admin(request, obj)\n+            if related_model_admin:\n+                return related_model_admin.has_change_permission(request, obj)\n+            # If the related model doesn't have an admin, check permissions directly\n+            for field in self.opts.fields:\n+                if field.remote_field and field.remote_field.model != self.parent_model:\n+                    return request.user.has_perm(\n+                        '%s.%s' % (field.remote_field.model._meta.app_label,\n+                                   get_permission_codename('change', field.remote_field.model._meta))\n+                    )\n+            return False\n         return super().has_change_permission(request)\n \n     def has_delete_permission(self, request, obj=None):\n         if self.opts.auto_created:\n             # We're checking the rights to an auto-created intermediate model,\n             # which doesn't have its own individual permissions. The user needs\n-            # to have the view permission for the related model in order to\n-            # be able to do anything with the intermediate model.\n-            return self.has_view_permission(request, obj)\n+            # to have the change permission for the related model in order to\n+            # be able to delete the intermediate model (i.e., remove the relationship).\n+            related_model_admin = self._get_related_model_admin(request, obj)\n+            if related_model_admin:\n+                return related_model_admin.has_delete_permission(request, obj)\n+            # If the related model doesn't have an admin, check permissions directly\n+            for field in self.opts.fields:\n+                if field.remote_field and field.remote_field.model != self.parent_model:\n+                    return request.user.has_perm(\n+                        '%s.%s' % (field.remote_field.model._meta.app_label,\n+                                   get_permission_codename('change', field.remote_field.model._meta))\n+                    )\n+            return False\n         return super().has_delete_permission(request, obj)\n \n+    def _get_related_model_admin(self, request, obj):\n+        \"\"\"\n+        Get the admin instance for the related model of an auto-created intermediate model.\n+        \"\"\"\n+        opts = self.opts\n+        # The model was auto-created as intermediary for a many-to-many\n+        # Many-relationship; find the target model.\n+        for field in opts.fields:\n+            if field.remote_field and field.remote_field.model != self.parent_model:\n+                return self.admin_site._registry.get(field.remote_field.model)\n+        return None\n+\n     def has_view_permission(self, request, obj=None):\n         if self.opts.auto_created:\n             opts = self.opts\n"
+  },
+  "django__django-11265": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11265",
+    "model_patch": ""
+  },
+  "django__django-11206": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11206",
+    "model_patch": "diff --git a/django/utils/numberformat.py b/django/utils/numberformat.py\nindex 88b35fc435..80772ddc79 100644\n--- a/django/utils/numberformat.py\n+++ b/django/utils/numberformat.py\n@@ -30,6 +30,10 @@ def format(number, decimal_sep, decimal_pos=None, grouping=0, thousand_sep='',\n         # Format values with more than 200 digits (an arbitrary cutoff) using\n         # scientific notation to avoid high memory usage in {:f}'.format().\n         _, digits, exponent = number.as_tuple()\n+        # If decimal_pos is specified and the number is too small to be represented\n+        # with that many decimal places, return 0 with the appropriate decimal places\n+        if decimal_pos is not None and exponent < 0 and abs(exponent) > decimal_pos:\n+            return '0.' + ('0' * decimal_pos)\n         if abs(exponent) + len(digits) > 200:\n             number = '{:e}'.format(number)\n             coefficient, exponent = number.split('e')\n"
+  },
+  "django__django-11211": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11211",
+    "model_patch": ""
+  },
+  "django__django-11333": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11333",
+    "model_patch": "diff --git a/django/urls/base.py b/django/urls/base.py\nindex 0e1c3d909c..1b63eebf0a 100644\n--- a/django/urls/base.py\n+++ b/django/urls/base.py\n@@ -7,7 +7,7 @@ from django.utils.functional import lazy\n from django.utils.translation import override\n \n from .exceptions import NoReverseMatch, Resolver404\n-from .resolvers import get_ns_resolver, get_resolver\n+from .resolvers import get_ns_resolver, get_resolver, _get_resolver\n from .utils import get_callable\n \n # SCRIPT_NAME prefixes for each thread are stored here. If there's no entry for\n@@ -92,7 +92,7 @@ reverse_lazy = lazy(reverse, str)\n \n def clear_url_caches():\n     get_callable.cache_clear()\n-    get_resolver.cache_clear()\n+    _get_resolver.cache_clear()\n     get_ns_resolver.cache_clear()\n \n \ndiff --git a/django/urls/resolvers.py b/django/urls/resolvers.py\nindex 247e3680c0..9b186dcc1e 100644\n--- a/django/urls/resolvers.py\n+++ b/django/urls/resolvers.py\n@@ -64,12 +64,26 @@ class ResolverMatch:\n \n \n @functools.lru_cache(maxsize=None)\n-def get_resolver(urlconf=None):\n-    if urlconf is None:\n-        urlconf = settings.ROOT_URLCONF\n+def _get_resolver(urlconf=None):\n+    \"\"\"\n+    Get the resolver for the given URLconf module.\n+    \"\"\"\n+    urlconf = settings.ROOT_URLCONF\n     return URLResolver(RegexPattern(r'^/'), urlconf)\n \n \n+def get_resolver(urlconf=None):\n+    \"\"\"\n+    Get the resolver for the given URLconf module.\n+    \n+    Always uses settings.ROOT_URLCONF as the cache key to avoid\n+    creating multiple URLResolvers when get_resolver is called\n+    with different urlconf values (e.g., None before set_urlconf\n+    is called, and the actual urlconf after).\n+    \"\"\"\n+    return _get_resolver()\n+\n+\n @functools.lru_cache(maxsize=None)\n def get_ns_resolver(ns_pattern, resolver, converters):\n     # Build a namespaced resolver for the given parent URLconf pattern.\n"
+  },
+  "django__django-11292": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11292",
+    "model_patch": ""
+  },
+  "django__django-11276": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11276",
+    "model_patch": ""
+  },
+  "astropy__astropy-13579": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "astropy__astropy-13579",
+    "model_patch": "diff --git a/astropy/wcs/wcsapi/wrappers/sliced_wcs.py b/astropy/wcs/wcsapi/wrappers/sliced_wcs.py\nindex d7605b078..40cd95c66 100644\n--- a/astropy/wcs/wcsapi/wrappers/sliced_wcs.py\n+++ b/astropy/wcs/wcsapi/wrappers/sliced_wcs.py\n@@ -3,6 +3,8 @@ from collections import defaultdict\n \n import numpy as np\n \n+import astropy.units as u\n+\n from astropy.utils import isiterable\n from astropy.utils.decorators import lazyproperty\n \n@@ -246,12 +248,17 @@ class SlicedLowLevelWCS(BaseWCSWrapper):\n         world_arrays = tuple(map(np.asanyarray, world_arrays))\n         world_arrays_new = []\n         iworld_curr = -1\n+        # Precompute the list of dropped world dimension indices\n+        dropped_indices = [i for i in range(self._wcs.world_n_dim) if i not in self._world_keep]\n         for iworld in range(self._wcs.world_n_dim):\n             if iworld in self._world_keep:\n                 iworld_curr += 1\n                 world_arrays_new.append(world_arrays[iworld_curr])\n             else:\n-                world_arrays_new.append(1.)\n+                # Use the actual value from dropped_world_dimensions for the dropped world dimension\n+                # Find the index of this dropped dimension in the dropped_indices list\n+                dropped_dim_index = dropped_indices.index(iworld)\n+                world_arrays_new.append(self.dropped_world_dimensions['value'][dropped_dim_index])\n \n         world_arrays_new = np.broadcast_arrays(*world_arrays_new)\n         pixel_arrays = list(self._wcs.world_to_pixel_values(*world_arrays_new))\n"
+  },
+  "django__django-11451": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11451",
+    "model_patch": "diff --git a/django/contrib/auth/backends.py b/django/contrib/auth/backends.py\nindex f4b1722757..24fcb7ded8 100644\n--- a/django/contrib/auth/backends.py\n+++ b/django/contrib/auth/backends.py\n@@ -37,6 +37,8 @@ class ModelBackend(BaseBackend):\n     \"\"\"\n \n     def authenticate(self, request, username=None, password=None, **kwargs):\n+        if username is None or password is None:\n+            return\n         if username is None:\n             username = kwargs.get(UserModel.USERNAME_FIELD)\n         try:\n"
+  },
+  "django__django-11400": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11400",
+    "model_patch": ""
+  },
+  "django__django-11433": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11433",
+    "model_patch": ""
+  },
+  "django__django-11299": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11299",
+    "model_patch": ""
+  },
+  "django__django-11532": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11532",
+    "model_patch": "diff --git a/django/core/mail/utils.py b/django/core/mail/utils.py\nindex d18dfe4667..dd1cbf7986 100644\n--- a/django/core/mail/utils.py\n+++ b/django/core/mail/utils.py\n@@ -14,7 +14,7 @@ class CachedDnsName:\n     def get_fqdn(self):\n         if not hasattr(self, '_fqdn'):\n             self._fqdn = socket.getfqdn()\n-        return self._fqdn\n+        return self._fqdn.encode('idna').decode('ascii')\n \n \n DNS_NAME = CachedDnsName()\n"
+  },
+  "django__django-11477": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11477",
+    "model_patch": ""
+  },
+  "django__django-10999": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-10999",
+    "model_patch": ""
+  },
+  "django__django-11551": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11551",
+    "model_patch": "diff --git a/django/contrib/admin/checks.py b/django/contrib/admin/checks.py\nindex f82c20c2f1..9fd77b5d41 100644\n--- a/django/contrib/admin/checks.py\n+++ b/django/contrib/admin/checks.py\n@@ -720,33 +720,33 @@ class ModelAdminChecks(BaseModelAdminChecks):\n             return []\n         elif hasattr(obj, item):\n             return []\n-        elif hasattr(obj.model, item):\n+        else:\n             try:\n                 field = obj.model._meta.get_field(item)\n             except FieldDoesNotExist:\n-                return []\n-            else:\n-                if isinstance(field, models.ManyToManyField):\n+                try:\n+                    field = getattr(obj.model, item)\n+                except AttributeError:\n                     return [\n                         checks.Error(\n-                            \"The value of '%s' must not be a ManyToManyField.\" % label,\n+                            \"The value of '%s' refers to '%s', which is not a callable, \"\n+                            \"an attribute of '%s', or an attribute or method on '%s.%s'.\" % (\n+                                label, item, obj.__class__.__name__,\n+                                obj.model._meta.app_label, obj.model._meta.object_name,\n+                            ),\n                             obj=obj.__class__,\n-                            id='admin.E109',\n+                            id='admin.E108',\n                         )\n                     ]\n-                return []\n-        else:\n-            return [\n-                checks.Error(\n-                    \"The value of '%s' refers to '%s', which is not a callable, \"\n-                    \"an attribute of '%s', or an attribute or method on '%s.%s'.\" % (\n-                        label, item, obj.__class__.__name__,\n-                        obj.model._meta.app_label, obj.model._meta.object_name,\n-                    ),\n-                    obj=obj.__class__,\n-                    id='admin.E108',\n-                )\n-            ]\n+            if isinstance(field, models.ManyToManyField):\n+                return [\n+                    checks.Error(\n+                        \"The value of '%s' must not be a ManyToManyField.\" % label,\n+                        obj=obj.__class__,\n+                        id='admin.E109',\n+                    )\n+                ]\n+            return []\n \n     def _check_list_display_links(self, obj):\n         \"\"\" Check that list_display_links is a unique subset of list_display.\n"
+  },
+  "django__django-11603": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11603",
+    "model_patch": "diff --git a/django/db/models/aggregates.py b/django/db/models/aggregates.py\nindex da4ff928aa..3effaa7533 100644\n--- a/django/db/models/aggregates.py\n+++ b/django/db/models/aggregates.py\n@@ -99,6 +99,7 @@ class Aggregate(Func):\n class Avg(FixDurationInputMixin, NumericOutputFieldMixin, Aggregate):\n     function = 'AVG'\n     name = 'Avg'\n+    allow_distinct = True\n \n \n class Count(Aggregate):\n@@ -121,11 +122,13 @@ class Count(Aggregate):\n class Max(Aggregate):\n     function = 'MAX'\n     name = 'Max'\n+    allow_distinct = True\n \n \n class Min(Aggregate):\n     function = 'MIN'\n     name = 'Min'\n+    allow_distinct = True\n \n \n class StdDev(NumericOutputFieldMixin, Aggregate):\n@@ -142,6 +145,7 @@ class StdDev(NumericOutputFieldMixin, Aggregate):\n class Sum(FixDurationInputMixin, Aggregate):\n     function = 'SUM'\n     name = 'Sum'\n+    allow_distinct = True\n \n \n class Variance(NumericOutputFieldMixin, Aggregate):\n"
+  },
+  "django__django-11790": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11790",
+    "model_patch": "diff --git a/django/contrib/auth/forms.py b/django/contrib/auth/forms.py\nindex a0cfed0995..6ca5c7f6bc 100644\n--- a/django/contrib/auth/forms.py\n+++ b/django/contrib/auth/forms.py\n@@ -192,6 +192,9 @@ class AuthenticationForm(forms.Form):\n         # Set the max length and label for the \"username\" field.\n         self.username_field = UserModel._meta.get_field(UserModel.USERNAME_FIELD)\n         self.fields['username'].max_length = self.username_field.max_length or 254\n+        self.fields['username'].widget.attrs.update(\n+            self.fields['username'].widget_attrs(self.fields['username'].widget)\n+        )\n         if self.fields['username'].label is None:\n             self.fields['username'].label = capfirst(self.username_field.verbose_name)\n \n"
+  },
+  "django__django-11740": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11740",
+    "model_patch": ""
+  },
+  "django__django-11815": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11815",
+    "model_patch": "diff --git a/django/db/migrations/serializer.py b/django/db/migrations/serializer.py\nindex 27b5cbd379..f3079290f9 100755\n--- a/django/db/migrations/serializer.py\n+++ b/django/db/migrations/serializer.py\n@@ -120,9 +120,10 @@ class EnumSerializer(BaseSerializer):\n     def serialize(self):\n         enum_class = self.value.__class__\n         module = enum_class.__module__\n-        v_string, v_imports = serializer_factory(self.value.value).serialize()\n-        imports = {'import %s' % module, *v_imports}\n-        return \"%s.%s(%s)\" % (module, enum_class.__name__, v_string), imports\n+        # Use the enum member name instead of value, as the value may be\n+        # translated and change over time. The name is constant.\n+        member_name = self.value.name\n+        return \"%s.%s[%r]\" % (module, enum_class.__name__, member_name), set()\n \n \n class FloatSerializer(BaseSimpleSerializer):\n"
+  },
+  "django__django-11555": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11555",
+    "model_patch": ""
+  },
+  "django__django-11734": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11734",
+    "model_patch": ""
+  },
+  "django__django-11490": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11490",
+    "model_patch": ""
+  },
+  "django__django-11880": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11880",
+    "model_patch": "diff --git a/django/forms/fields.py b/django/forms/fields.py\nindex 03cd8af8d7..4cc3133ca0 100644\n--- a/django/forms/fields.py\n+++ b/django/forms/fields.py\n@@ -200,6 +200,7 @@ class Field:\n         memo[id(self)] = result\n         result.widget = copy.deepcopy(self.widget, memo)\n         result.validators = self.validators[:]\n+        result.error_messages = copy.deepcopy(self.error_messages, memo)\n         return result\n \n \n"
+  },
+  "django__django-11848": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11848",
+    "model_patch": "diff --git a/django/utils/http.py b/django/utils/http.py\nindex 572cfb4347..3e115d9b90 100755\n--- a/django/utils/http.py\n+++ b/django/utils/http.py\n@@ -176,10 +176,13 @@ def parse_http_date(date):\n     try:\n         year = int(m.group('year'))\n         if year < 100:\n-            if year < 70:\n-                year += 2000\n-            else:\n+            # RFC 7231: two-digit years are interpreted relative to the current year.\n+            # If the year appears to be more than 50 years in the future,\n+            # interpret it as the most recent past year with the same last two digits.\n+            if year >= (datetime.datetime.now().year % 100) + 51:\n                 year += 1900\n+            else:\n+                year += 2000\n         month = MONTHS.index(m.group('mon').lower()) + 1\n         day = int(m.group('day'))\n         hour = int(m.group('hour'))\n"
+  },
+  "django__django-11749": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11749",
+    "model_patch": ""
+  },
+  "django__django-11951": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11951",
+    "model_patch": "diff --git a/django/db/models/query.py b/django/db/models/query.py\nindex 794e0faae7..6cd5e6d599 100644\n--- a/django/db/models/query.py\n+++ b/django/db/models/query.py\n@@ -1209,7 +1209,9 @@ class QuerySet:\n         if ignore_conflicts and not connections[self.db].features.supports_ignore_conflicts:\n             raise NotSupportedError('This database backend does not support ignoring conflicts.')\n         ops = connections[self.db].ops\n-        batch_size = (batch_size or max(ops.bulk_batch_size(fields, objs), 1))\n+        max_batch_size = ops.bulk_batch_size(fields, objs)\n+        batch_size = min(batch_size, max_batch_size) if batch_size else max_batch_size\n+        batch_size = max(batch_size, 1)\n         inserted_rows = []\n         bulk_return = connections[self.db].features.can_return_rows_from_bulk_insert\n         for item in [objs[i:i + batch_size] for i in range(0, len(objs), batch_size)]:\n"
+  },
+  "django__django-11820": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11820",
+    "model_patch": ""
+  },
+  "django__django-12050": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12050",
+    "model_patch": "diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py\nindex ea51912e8b..6a5f741bae 100644\n--- a/django/db/models/sql/query.py\n+++ b/django/db/models/sql/query.py\n@@ -1059,6 +1059,7 @@ class Query(BaseExpression):\n         elif isinstance(value, (list, tuple)):\n             # The items of the iterable may be expressions and therefore need\n             # to be resolved independently.\n+            # Preserve the original type of the iterable (list vs tuple).\n             resolved_values = []\n             for sub_value in value:\n                 if hasattr(sub_value, 'resolve_expression'):\n@@ -1073,7 +1074,7 @@ class Query(BaseExpression):\n                         ))\n                 else:\n                     resolved_values.append(sub_value)\n-            value = tuple(resolved_values)\n+            value = type(value)(resolved_values)\n         return value\n \n     def solve_lookup_type(self, lookup):\n"
+  },
+  "django__django-11999": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11999",
+    "model_patch": ""
+  },
+  "django__django-11885": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11885",
+    "model_patch": ""
+  },
+  "django__django-12039": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12039",
+    "model_patch": "diff --git a/django/db/backends/ddl_references.py b/django/db/backends/ddl_references.py\nindex 44e49806f8..556b82b960 100644\n--- a/django/db/backends/ddl_references.py\n+++ b/django/db/backends/ddl_references.py\n@@ -112,9 +112,16 @@ class IndexColumns(Columns):\n         def col_str(column, idx):\n             # Index.__init__() guarantees that self.opclasses is the same\n             # length as self.columns.\n-            col = '{} {}'.format(self.quote_name(column), self.opclasses[idx])\n+            col = self.quote_name(column)\n+            if idx < len(self.opclasses) and self.opclasses[idx]:\n+                col = '{} {}'.format(col, self.opclasses[idx])\n             try:\n-                col = '{} {}'.format(col, self.col_suffixes[idx])\n+                if idx < len(self.col_suffixes) and self.col_suffixes[idx]:\n+                    # Only add space if col_suffix doesn't already start with one\n+                    if not self.col_suffixes[idx].startswith(' '):\n+                        col = '{} {}'.format(col, self.col_suffixes[idx])\n+                    else:\n+                        col = '{}{}'.format(col, self.col_suffixes[idx])\n             except IndexError:\n                 pass\n             return col\n"
+  },
+  "django__django-11964": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11964",
+    "model_patch": ""
+  },
+  "django__django-11728": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-11728",
+    "model_patch": ""
+  },
+  "django__django-12143": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12143",
+    "model_patch": "diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py\nindex 137e6faa0f..a100f1c499 100644\n--- a/django/contrib/admin/options.py\n+++ b/django/contrib/admin/options.py\n@@ -1631,7 +1631,7 @@ class ModelAdmin(BaseModelAdmin):\n \n     def _get_edited_object_pks(self, request, prefix):\n         \"\"\"Return POST data values of list_editable primary keys.\"\"\"\n-        pk_pattern = re.compile(r'{}-\\d+-{}$'.format(prefix, self.model._meta.pk.name))\n+        pk_pattern = re.compile(r'{}-\\d+-{}$'.format(re.escape(prefix), self.model._meta.pk.name))\n         return [value for key, value in request.POST.items() if pk_pattern.match(key)]\n \n     def _get_list_editable_queryset(self, request, prefix):\n"
+  },
+  "django__django-12155": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12155",
+    "model_patch": "\"Misc. utility functions/classes for admin documentation generator.\"\n\nimport re\nfrom email.errors import HeaderParseError\nfrom email.parser import HeaderParser\n\nfrom django.urls import reverse\nfrom django.utils.regex_helper import _lazy_re_compile\nfrom django.utils.safestring import mark_safe\n\ntry:\n    import docutils.core\n    import docutils.nodes\n    import docutils.parsers.rst.roles\nexcept ImportError:\n    docutils_is_available = False\nelse:\n    docutils_is_available = True\n\n\ndef get_view_name(view_func):\n    mod_name = view_func.__module__\n    view_name = getattr(view_func, '__qualname__', view_func.__class__.__name__)\n    return mod_name + '.' + view_name\n\n\ndef trim_docstring(docstring):\n    \"\"\"\n    Uniformly trim leading/trailing whitespace from docstrings.\n\n    Based on https://www.python.org/dev/peps/pep-0257/#handling-docstring-indentation\n    \"\"\"\n    if not docstring or not docstring.strip():\n        return ''\n    # Convert tabs to spaces and split into lines\n    lines = docstring.expandtabs().splitlines()\n    # Skip the first line to get the minimum indent from the rest\n    # If there are no other lines with content, use 0\n    remaining_lines = lines[1:]\n    if remaining_lines and any(line.lstrip() for line in remaining_lines):\n        indent = min(len(line) - len(line.lstrip()) for line in remaining_lines if line.lstrip())\n    else:\n        indent = 0\n    trimmed = [lines[0].lstrip()] + [line[indent:].rstrip() for line in lines[1:]]\n    return \"\\n\".join(trimmed).strip()\n\n\ndef parse_docstring(docstring):\n    \"\"\"\n    Parse out the parts of a docstring.  Return (title, body, metadata).\n"
+  },
+  "django__django-12308": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12308",
+    "model_patch": "diff --git a/django/contrib/admin/utils.py b/django/contrib/admin/utils.py\nindex e4ddc8f017..c27628a134 100755\n--- a/django/contrib/admin/utils.py\n+++ b/django/contrib/admin/utils.py\n@@ -398,6 +398,8 @@ def display_for_field(value, field, empty_value_display):\n         return formats.number_format(value)\n     elif isinstance(field, models.FileField) and value:\n         return format_html('<a href=\"{}\">{}</a>', value.url, value)\n+    elif isinstance(field, models.JSONField):\n+        return field.formfield().prepare_value(value)\n     else:\n         return display_for_value(value, empty_value_display)\n \n"
+  },
+  "django__django-12193": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12193",
+    "model_patch": "diff --git a/django/contrib/postgres/forms/array.py b/django/contrib/postgres/forms/array.py\nindex 2e19cd574a..b9b99c4817 100644\n--- a/django/contrib/postgres/forms/array.py\n+++ b/django/contrib/postgres/forms/array.py\n@@ -146,8 +146,12 @@ class SplitArrayWidget(forms.Widget):\n                 widget_value = None\n             if id_:\n                 final_attrs = {**final_attrs, 'id': '%s_%s' % (id_, i)}\n+            # Create a copy of final_attrs to avoid modifying the same dict\n+            # across all widget calls, which causes CheckboxInput to set\n+            # 'checked': True for all widgets after the first True value\n+            widget_attrs = final_attrs.copy()\n             context['widget']['subwidgets'].append(\n-                self.widget.get_context(name + '_%s' % i, widget_value, final_attrs)['widget']\n+                self.widget.get_context(name + '_%s' % i, widget_value, widget_attrs)['widget']\n             )\n         return context\n \n"
+  },
+  "django__django-12125": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12125",
+    "model_patch": ""
+  },
+  "django__django-12276": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12276",
+    "model_patch": "diff --git a/django/forms/widgets.py b/django/forms/widgets.py\nindex 338d54d72f..e9f2e47d60 100644\n--- a/django/forms/widgets.py\n+++ b/django/forms/widgets.py\n@@ -387,6 +387,9 @@ class FileInput(Input):\n     def value_omitted_from_data(self, data, files, name):\n         return name not in files\n \n+    def use_required_attribute(self, initial):\n+        return super().use_required_attribute(initial) and not initial\n+\n \n FILE_INPUT_CONTRADICTION = object()\n \n"
+  },
+  "django__django-12262": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12262",
+    "model_patch": ""
+  },
+  "django__django-12209": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12209",
+    "model_patch": "diff --git a/django/db/models/base.py b/django/db/models/base.py\nindex e3b14a41a0..8751af4ffa 100644\n--- a/django/db/models/base.py\n+++ b/django/db/models/base.py\n@@ -398,6 +398,7 @@ class ModelState:\n     # explicit (non-auto) PKs. This impacts validation only; it has no effect\n     # on the actual save.\n     adding = True\n+    explicit_pk = False\n     fields_cache = ModelStateFieldsCacheDescriptor()\n \n \n@@ -419,6 +420,12 @@ class Model(metaclass=ModelBase):\n         # overrides it. It should be one or the other; don't duplicate the work\n         # The reason for the kwargs check is that standard iterator passes in by\n         # args, and instantiation for iteration is 33% faster.\n+        # Check if pk is explicitly set in kwargs\n+        pk_field = opts.pk\n+        # 'pk' is a special keyword that can be used to set the primary key\n+        # regardless of the actual field name\n+        self._state.explicit_pk = 'pk' in kwargs or pk_field.name in kwargs\n+\n         if len(args) > len(opts.concrete_fields):\n             # Daft, but matches old exception sans the err msg.\n             raise IndexError(\"Number of args exceeds number of fields\")\n@@ -851,6 +858,7 @@ class Model(metaclass=ModelBase):\n         if (\n             not force_insert and\n             self._state.adding and\n+            not self._state.explicit_pk and\n             self._meta.pk.default and\n             self._meta.pk.default is not NOT_PROVIDED\n         ):\n"
+  },
+  "django__django-12419": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12419",
+    "model_patch": "Need to create patch file first\n"
+  },
+  "django__django-12304": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12304",
+    "model_patch": "diff --git a/django/db/models/enums.py b/django/db/models/enums.py\nindex f48143ddaf..a460dd6a8f 100644\n--- a/django/db/models/enums.py\n+++ b/django/db/models/enums.py\n@@ -8,7 +8,7 @@ __all__ = ['Choices', 'IntegerChoices', 'TextChoices']\n class ChoicesMeta(enum.EnumMeta):\n     \"\"\"A metaclass for creating a enum choices.\"\"\"\n \n-    def __new__(metacls, classname, bases, classdict):\n+    def __new__(metacls, classname, bases, classdict, **kwargs):\n         labels = []\n         for key in classdict._member_names:\n             value = classdict[key]\n@@ -25,7 +25,9 @@ class ChoicesMeta(enum.EnumMeta):\n             # Use dict.__setitem__() to suppress defenses against double\n             # assignment in enum's classdict.\n             dict.__setitem__(classdict, key, value)\n-        cls = super().__new__(metacls, classname, bases, classdict)\n+        cls = super().__new__(metacls, classname, bases, classdict, **kwargs)\n+        # Prevent the enum class from being called in templates\n+        cls.do_not_call_in_templates = True\n         cls._value2label_map_ = dict(zip(cls._value2member_map_, labels))\n         # Add a label property to instances of enum which uses the enum member\n         # that is passed in as \"self\" as the value to use when looking up the\n"
+  },
+  "django__django-12741": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12741",
+    "model_patch": "diff --git a/django/core/management/commands/flush.py b/django/core/management/commands/flush.py\nindex e8ed3967f7..bc8021cf4e 100644\n--- a/django/core/management/commands/flush.py\n+++ b/django/core/management/commands/flush.py\n@@ -60,7 +60,7 @@ Are you sure you want to do this?\n \n         if confirm == 'yes':\n             try:\n-                connection.ops.execute_sql_flush(database, sql_list)\n+                connection.ops.execute_sql_flush(sql_list)\n             except Exception as exc:\n                 raise CommandError(\n                     \"Database %s couldn't be flushed. Possible reasons:\\n\"\ndiff --git a/django/db/backends/base/operations.py b/django/db/backends/base/operations.py\nindex 70ac07ae09..f07580c18b 100644\n--- a/django/db/backends/base/operations.py\n+++ b/django/db/backends/base/operations.py\n@@ -400,9 +400,9 @@ class BaseDatabaseOperations:\n         \"\"\"\n         raise NotImplementedError('subclasses of BaseDatabaseOperations must provide a sql_flush() method')\n \n-    def execute_sql_flush(self, using, sql_list):\n+    def execute_sql_flush(self, sql_list):\n         \"\"\"Execute a list of SQL statements to flush the database.\"\"\"\n-        with transaction.atomic(using=using, savepoint=self.connection.features.can_rollback_ddl):\n+        with transaction.atomic(using=self.connection.alias, savepoint=self.connection.features.can_rollback_ddl):\n             with self.connection.cursor() as cursor:\n                 for sql in sql_list:\n                     cursor.execute(sql)\n"
+  },
+  "django__django-12273": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12273",
+    "model_patch": ""
+  },
+  "django__django-12713": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12713",
+    "model_patch": "diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py\nindex 69a5fbf389..db7df891e3 100644\n--- a/django/contrib/admin/options.py\n+++ b/django/contrib/admin/options.py\n@@ -249,16 +249,17 @@ class BaseModelAdmin(metaclass=forms.MediaDefiningClass):\n             return None\n         db = kwargs.get('using')\n \n-        autocomplete_fields = self.get_autocomplete_fields(request)\n-        if db_field.name in autocomplete_fields:\n-            kwargs['widget'] = AutocompleteSelectMultiple(db_field.remote_field, self.admin_site, using=db)\n-        elif db_field.name in self.raw_id_fields:\n-            kwargs['widget'] = widgets.ManyToManyRawIdWidget(db_field.remote_field, self.admin_site, using=db)\n-        elif db_field.name in [*self.filter_vertical, *self.filter_horizontal]:\n-            kwargs['widget'] = widgets.FilteredSelectMultiple(\n-                db_field.verbose_name,\n-                db_field.name in self.filter_vertical\n-            )\n+        if 'widget' not in kwargs:\n+            autocomplete_fields = self.get_autocomplete_fields(request)\n+            if db_field.name in autocomplete_fields:\n+                kwargs['widget'] = AutocompleteSelectMultiple(db_field.remote_field, self.admin_site, using=db)\n+            elif db_field.name in self.raw_id_fields:\n+                kwargs['widget'] = widgets.ManyToManyRawIdWidget(db_field.remote_field, self.admin_site, using=db)\n+            elif db_field.name in [*self.filter_vertical, *self.filter_horizontal]:\n+                kwargs['widget'] = widgets.FilteredSelectMultiple(\n+                    db_field.verbose_name,\n+                    db_field.name in self.filter_vertical\n+                )\n \n         if 'queryset' not in kwargs:\n             queryset = self.get_field_queryset(db, db_field, request)\n"
+  },
+  "django__django-12325": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12325",
+    "model_patch": ""
+  },
+  "django__django-12708": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12708",
+    "model_patch": ""
+  },
+  "django__django-12754": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12754",
+    "model_patch": ""
+  },
+  "django__django-12774": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12774",
+    "model_patch": "diff --git a/django/db/models/options.py b/django/db/models/options.py\nindex 0e28b6812a..8b83528d7b 100644\n--- a/django/db/models/options.py\n+++ b/django/db/models/options.py\n@@ -840,6 +840,17 @@ class Options:\n             if isinstance(constraint, UniqueConstraint) and constraint.condition is None\n         ]\n \n+    def has_unique_constraint(self, field_name):\n+        \"\"\"\n+        Check if a field is part of any UniqueConstraint without a condition.\n+        This is useful for determining if a field is guaranteed to be unique\n+        for all rows, which is required for operations like in_bulk().\n+        \"\"\"\n+        for constraint in self.constraints:\n+            if isinstance(constraint, UniqueConstraint) and constraint.condition is None and field_name in constraint.fields:\n+                return True\n+        return False\n+\n     @cached_property\n     def _property_names(self):\n         \"\"\"Return a set of the names of the properties defined on the model.\"\"\"\ndiff --git a/django/db/models/query.py b/django/db/models/query.py\nindex d9c9b0db04..fa428cc29d 100644\n--- a/django/db/models/query.py\n+++ b/django/db/models/query.py\n@@ -689,7 +689,7 @@ class QuerySet:\n         \"\"\"\n         assert not self.query.is_sliced, \\\n             \"Cannot use 'limit' or 'offset' with in_bulk\"\n-        if field_name != 'pk' and not self.model._meta.get_field(field_name).unique:\n+        if field_name != 'pk' and not self.model._meta.get_field(field_name).unique and not self.model._meta.has_unique_constraint(field_name):\n             raise ValueError(\"in_bulk()'s field_name must be a unique field but %r isn't.\" % field_name)\n         if id_list is not None:\n             if not id_list:\n"
+  },
+  "django__django-13023": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-13023",
+    "model_patch": "diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py\nindex 0fd69059ee..28374272f4 100644\n--- a/django/db/models/fields/__init__.py\n+++ b/django/db/models/fields/__init__.py\n@@ -1501,7 +1501,7 @@ class DecimalField(Field):\n             return self.context.create_decimal_from_float(value)\n         try:\n             return decimal.Decimal(value)\n-        except decimal.InvalidOperation:\n+        except (decimal.InvalidOperation, TypeError, ValueError):\n             raise exceptions.ValidationError(\n                 self.error_messages['invalid'],\n                 code='invalid',\ndiff --git a/django/forms/fields.py b/django/forms/fields.py\nindex 36dad72704..ab58cd3a6b 100644\n--- a/django/forms/fields.py\n+++ b/django/forms/fields.py\n@@ -346,7 +346,7 @@ class DecimalField(IntegerField):\n         value = str(value).strip()\n         try:\n             value = Decimal(value)\n-        except DecimalException:\n+        except (DecimalException, TypeError, ValueError):\n             raise ValidationError(self.error_messages['invalid'], code='invalid')\n         return value\n \n"
+  },
+  "django__django-12406": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12406",
+    "model_patch": ""
+  },
+  "django__django-12663": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12663",
+    "model_patch": ""
+  },
+  "django__django-12858": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12858",
+    "model_patch": ""
+  },
+  "django__django-13028": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-13028",
+    "model_patch": ""
+  },
+  "django__django-13012": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-13012",
+    "model_patch": ""
+  },
+  "django__django-12965": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-12965",
+    "model_patch": ""
+  },
+  "django__django-13089": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-13089",
+    "model_patch": ""
+  },
+  "django__django-13121": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-13121",
+    "model_patch": ""
+  },
+  "django__django-13109": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-13109",
+    "model_patch": "diff --git a/django/db/models/fields/related.py b/django/db/models/fields/related.py\nindex d517d7269b..0f0a5d982b 100644\n--- a/django/db/models/fields/related.py\n+++ b/django/db/models/fields/related.py\n@@ -914,7 +914,7 @@ class ForeignKey(ForeignObject):\n             return\n \n         using = router.db_for_read(self.remote_field.model, instance=model_instance)\n-        qs = self.remote_field.model._default_manager.using(using).filter(\n+        qs = self.remote_field.model._base_manager.using(using).filter(\n             **{self.remote_field.field_name: value}\n         )\n         qs = qs.complex_filter(self.get_limit_choices_to())\n@@ -984,7 +984,7 @@ class ForeignKey(ForeignObject):\n                              (self.name, self.remote_field.model))\n         return super().formfield(**{\n             'form_class': forms.ModelChoiceField,\n-            'queryset': self.remote_field.model._default_manager.using(using),\n+            'queryset': self.remote_field.model._base_manager.using(using),\n             'to_field_name': self.remote_field.field_name,\n             **kwargs,\n             'blank': self.blank,\n@@ -1668,7 +1668,7 @@ class ManyToManyField(RelatedField):\n     def formfield(self, *, using=None, **kwargs):\n         defaults = {\n             'form_class': forms.ModelMultipleChoiceField,\n-            'queryset': self.remote_field.model._default_manager.using(using),\n+            'queryset': self.remote_field.model._base_manager.using(using),\n             **kwargs,\n         }\n         # If initial is passed in, it's a list of related objects, but the\n"
+  },
+  "django__django-13112": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-13112",
+    "model_patch": ""
+  },
+  "django__django-13033": {
+    "model_name_or_path": "hosted_vllm/Qwen/Qwen3.5-9B",
+    "instance_id": "django__django-13033",
+    "model_patch": ""
+  }
+}
