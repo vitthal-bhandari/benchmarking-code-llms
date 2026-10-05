@@ -4,6 +4,9 @@
 #   bash scripts/launch_arms.sh configs/models/qwen35-9b.env
 #   bash scripts/launch_arms.sh configs/models/qwen35-9b.env acm      # one arm only
 #   DRY=1 bash scripts/launch_arms.sh configs/models/gemma4-12b-it.env
+#   # top up an existing run (skips instances already in its preds.json):
+#   RESUME=1 OUTPUT_DIR=runs/<existing_dir> INSTANCE_FILE=configs/mem_subset_99.txt \
+#     bash scripts/launch_arms.sh configs/models/qwen35-9b.env summarize
 #   # single-instance smoke (writes to runs/<tag>_<arm>_smoke):
 #   INSTANCE_IDS=astropy__astropy-13236 bash scripts/launch_arms.sh configs/models/mimo-9b.env acm
 #
@@ -47,7 +50,7 @@ pairs() {
            MAX_NUM_BATCHED_TOKENS MOE_BACKEND ENFORCE_EAGER KV_CACHE_DTYPE \
            TEMPERATURE TOP_P TOP_K MIN_P PRESENCE_PENALTY REPETITION_PENALTY SEED \
            ENABLE_THINKING MAX_TOKENS MAX_MODEL_LEN CONTEXT_CAP KEEP_LAST_K \
-           INSTANCE_FILE INSTANCE_IDS WORKERS SWEBENCH_SIF_DIR; do
+           INSTANCE_FILE INSTANCE_IDS WORKERS SWEBENCH_SIF_DIR RESUME; do
     [ -n "${!v:-}" ] && out="${out},${v}=${!v}"
   done
   printf '%s' "$out"
@@ -58,7 +61,11 @@ for ARM in "${ARMS[@]}"; do
   # SUMMARIZE_AT only means anything for A2; keep it out of the other arms so
   # their logged config isn't misleading.
   [ "$ARM" = "summarize" ] && [ -n "${SUMMARIZE_AT:-}" ] && EXTRA=",SUMMARIZE_AT=${SUMMARIZE_AT}"
-  EXPORTS="ALL$(pairs),MEMORY_POLICY=${ARM},OUTPUT_DIR=runs/${TAG}_${ARM}${SMOKE}${EXTRA}"
+  # An explicitly supplied OUTPUT_DIR wins, so RESUME=1 can top up an existing
+  # run. Previously this always overwrote it, which silently sent a resume into a
+  # brand-new directory instead of the one being resumed.
+  OUT="${OUTPUT_DIR:-runs/${TAG}_${ARM}${SMOKE}}"
+  EXPORTS="ALL$(pairs),MEMORY_POLICY=${ARM},OUTPUT_DIR=${OUT}${EXTRA}"
   if [ -n "${DRY:-}" ]; then
     echo "sbatch --account=stf --export=${EXPORTS} scripts/serve_and_run_swebench.slurm"
   else
