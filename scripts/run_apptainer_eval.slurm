@@ -54,7 +54,10 @@ export HF_HOME="${HF_HOME:-$SCRATCH/.cache/huggingface}"
 export TMPDIR="$SCRATCH/tmp"
 export APPTAINER_TMPDIR="$SCRATCH/tmp"
 export APPTAINER_EVAL_WORKDIR="$SCRATCH/apptainer_eval/$RUN_ID"
-export APPTAINER_EVAL_SIFDIR="$SCRATCH/apptainer_eval/$RUN_ID/sif"
+# Default is per-run, but point every run at ONE shared dir (and KEEP_SIF=1) to
+# fetch the 99 images once instead of once per run — see pull_image's note on the
+# manifest re-fetch counting against the Docker Hub limit.
+export APPTAINER_EVAL_SIFDIR="${APPTAINER_EVAL_SIFDIR:-$SCRATCH/apptainer_eval/$RUN_ID/sif}"
 mkdir -p "$APPTAINER_CACHEDIR" "$HF_HOME" "$TMPDIR" "$APPTAINER_EVAL_SIFDIR" logs
 
 # Docker Hub auth: raises the pull limit 100->200/6h. Combined with the shared,
@@ -80,6 +83,9 @@ source klone-eval-venv/bin/activate
 echo ">>> Scoring $RUN_ID from $PREDS (workers=$WORKERS, overlay=$OVERLAY_MODE, slice=${EVAL_SLICE:-all}, prefetch=${PREFETCH:-0})"
 EXTRA_ARGS=()
 [ -n "${INSTANCE_IDS:-}" ] && EXTRA_ARGS+=(--instance-ids "$INSTANCE_IDS")
+# KEEP_SIF=1 keeps images on disk for reuse by later runs. Costs ~99 images of
+# scratch; without it each run re-pulls and will hit the Hub rate limit.
+[ "${KEEP_SIF:-0}" = "1" ] && EXTRA_ARGS+=(--keep-sif)
 [ "${OVERWRITE:-0}" = "1" ] && EXTRA_ARGS+=(--overwrite)
 # PREFETCH=1: pull the images into the shared cache and exit (no scoring). Run
 # once before the parallel scoring jobs. EVAL_SLICE (start:end) is read directly

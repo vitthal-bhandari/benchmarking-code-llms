@@ -153,6 +153,13 @@ def pull_image(image: str, sif_path: Path, retries: int = 2) -> tuple[bool, str]
     pulls into 125 (each unique image downloaded once) — essential to avoid the
     Hub pull-rate limit, and Klone scratch has room for the cache. Set
     NO_PULL_CACHE=1 to force --disable-cache (the old disk-tight behavior)."""
+    # Reuse a .sif that is already on disk. apptainer pull --force re-fetches the
+    # Docker Hub MANIFEST even when every layer is cached, and Hub counts that as
+    # a pull: scoring 9 runs x 99 instances is ~891 pulls against ~200/6h. Pair
+    # this with a shared APPTAINER_EVAL_SIFDIR and KEEP_SIF=1 so the images are
+    # fetched once and every later run is offline.
+    if sif_path.exists() and sif_path.stat().st_size > 0:
+        return True, "reused existing sif"
     no_cache = os.environ.get("NO_PULL_CACHE", "0") == "1"
     cmd = ["apptainer", "pull"]
     if no_cache:
