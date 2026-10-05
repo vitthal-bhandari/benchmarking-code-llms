@@ -26,9 +26,15 @@ def image_for(iid: str) -> str:
     # SWE-bench convention: "__" -> "_1776_", lowercased.
     return f"swebench/sweb.eval.x86_64.{iid.replace('__', '_1776_').lower()}:latest"
 
+def sif_for(iid: str, sifdir: Path) -> Path:
+    return sifdir / (image_for(iid).split("/")[-1].replace(":", "_") + ".sif")
+
+
 def pull(iid: str, outdir: Path, retries: int = 4) -> tuple[str, bool, str]:
     img = image_for(iid)
-    sif = outdir / f"prefetch_{iid}.sif"
+    sif = sif_for(iid, outdir)
+    if sif.exists() and sif.stat().st_size > 0:
+        return iid, True, "cached"
     tool = shutil.which("apptainer") or shutil.which("singularity")
     if not tool:
         return iid, False, "neither apptainer nor singularity on PATH"
@@ -36,7 +42,6 @@ def pull(iid: str, outdir: Path, retries: int = 4) -> tuple[str, bool, str]:
         p = subprocess.run([tool, "pull", "--force", str(sif), f"docker://{img}"],
                            capture_output=True, text=True)
         out = (p.stdout or "") + (p.stderr or "")
-        sif.unlink(missing_ok=True)       # only the layer cache matters
         if p.returncode == 0:
             return iid, True, ""
         if "TOOMANYREQUESTS" in out or "rate limit" in out.lower():
@@ -50,6 +55,10 @@ def pull(iid: str, outdir: Path, retries: int = 4) -> tuple[str, bool, str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instance-file", default="configs/mem_subset_99.txt")
+    ap.add_argument("--sif-dir", default=os.environ.get("SWEBENCH_SIF_DIR") or
+                    f"/gscratch/scrubbed/{os.environ.get('USER','')}/swebench_sif",
+                    help="persistent dir for the built .sif files; the driver reads these "
+                         "instead of docker:// so runs never contact Docker Hub")
     ap.add_argument("--workers", type=int, default=2,
                     help="keep LOW: concurrency is what triggers the rate limit (default 2)")
     a = ap.parse_args()
@@ -65,8 +74,9 @@ def main() -> int:
     print(f">>> prefetching {len(ids)} images into {cache} with {a.workers} workers")
 
     ok = bad = 0
-    with tempfile.TemporaryDirectory() as td:
-        outdir = Path(td)
+    outdir = Path(a.sif_dir); outdir.mkdir(parents=True, exist_ok=True)
+    print(f">>> sif dir: {outdir}")
+    if True:
         with ThreadPoolExecutor(max_workers=a.workers) as ex:
             for i, (iid, good, err) in enumerate(ex.map(lambda x: pull(x, outdir), ids), 1):
                 if good:
@@ -76,7 +86,8 @@ def main() -> int:
                     print(f"  [{i}/{len(ids)}] FAILED {iid}: {err}", flush=True)
                 if i % 10 == 0:
                     print(f"  ... {i}/{len(ids)} ({ok} ok, {bad} failed)", flush=True)
-    print(f">>> done: {ok} cached, {bad} failed")
+    print(f">>> done: {ok} built, {bad} failed  ->  {outdir}")
+    print(f">>> launch the arms with SWEBENCH_SIF_DIR={outdir}")
     if bad:
         print(">>> re-run to retry the failures before launching the arms")
     return 1 if bad else 0

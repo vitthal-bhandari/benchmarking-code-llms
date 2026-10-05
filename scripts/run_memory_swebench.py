@@ -22,6 +22,7 @@ import argparse
 import concurrent.futures
 import json
 import logging
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -46,6 +47,28 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("run_memory")
 
 
+def local_sif_env(config: dict, instance: dict):
+    """mini-swe-agent's get_sb_environment always builds from
+    "docker://" + image, so every instance re-fetches the Docker Hub manifest —
+    which Hub counts as a pull even when the layers are cached locally. At
+    9 jobs x 99 instances that is ~891 manifest GETs against a ~200/6h limit, and
+    it wiped out two full runs with TOOMANYREQUESTS. If a prebuilt .sif exists
+    (see scripts/prefetch_agent_images.py) point singularity at the local file so
+    the run never contacts Docker Hub at all."""
+    sif_dir = os.environ.get("SWEBENCH_SIF_DIR")
+    if sif_dir and config.get("environment", {}).get("environment_class") in ("singularity", "contree"):
+        from minisweagent.run.benchmarks.swebench import get_swebench_docker_image_name
+        from minisweagent.environments import get_environment
+        img = get_swebench_docker_image_name(instance)
+        sif = Path(sif_dir) / (img.split("/")[-1].replace(":", "_") + ".sif")
+        if sif.exists() and sif.stat().st_size > 0:
+            env_config = {**config.get("environment", {})}
+            env_config["image"] = str(sif)
+            return get_environment(env_config)
+        log.warning(f"no local sif for {instance['instance_id']} ({sif}); falling back to docker://")
+    return get_sb_environment(config, instance)
+
+
 def process_instance(instance: dict, output_dir: Path, config: dict, mem_cfg: dict) -> str:
     iid = instance["instance_id"]
     inst_dir = output_dir / iid
@@ -59,7 +82,7 @@ def process_instance(instance: dict, output_dir: Path, config: dict, mem_cfg: di
     exit_status = result = None
     extra_info = {}
     try:
-        env = get_sb_environment(config, instance)
+        env = local_sif_env(config, instance)
         agent = MemoryAgent(model, env, **mem_cfg, **config.get("agent", {}))
         info = agent.run(task)
         exit_status, result = info.get("exit_status"), info.get("submission")
