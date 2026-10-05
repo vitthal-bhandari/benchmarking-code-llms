@@ -26,6 +26,9 @@
 #SBATCH --job-name=sweb-eval
 #SBATCH --account=stf
 #SBATCH --partition=ckpt-all
+# ^ Klone's checkpoint partition. On another cluster override on the command
+# line (sbatch --partition=<name> wins over this directive). CPU-only job: no
+# --gres=gpu, so do not burn a GPU node on it.
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -47,7 +50,13 @@ OVERLAY_MODE="${OVERLAY_MODE:-overlay}"
 TIMEOUT="${TIMEOUT:-1800}"
 DATASET="${DATASET:-SWE-bench/SWE-bench_Verified}"
 
-SCRATCH="/gscratch/scrubbed/$USER"
+# Scratch differs per cluster: /gscratch/scrubbed on Klone, /gpfs/scrubbed on
+# Tillicum. Probe rather than hardcode so the same script scores on either.
+if [ -n "${EVAL_SCRATCH:-}" ]; then SCRATCH="$EVAL_SCRATCH"
+elif [ -d "/gscratch/scrubbed/$USER" ]; then SCRATCH="/gscratch/scrubbed/$USER"
+elif [ -d "/gpfs/scrubbed/$USER" ]; then SCRATCH="/gpfs/scrubbed/$USER"
+else SCRATCH="$PROJECT_DIR/.eval_scratch"; fi
+echo ">>> scratch: $SCRATCH"
 # All heavy/scratch state off of the 10GB home quota.
 export APPTAINER_CACHEDIR="$SCRATCH/.cache/apptainer"
 export HF_HOME="${HF_HOME:-$SCRATCH/.cache/huggingface}"
@@ -78,7 +87,12 @@ module load apptainer 2>/dev/null || module load singularity 2>/dev/null || \
   echo ">>> WARNING: could not module-load apptainer; assuming it's on PATH"
 command -v apptainer >/dev/null || { echo "ERROR: apptainer not found"; exit 1; }
 
-source klone-eval-venv/bin/activate
+# venv name is historical (built by install_klone_eval_venv.sh); accept either
+# so the same script runs on Tillicum without a second copy.
+for V in "${EVAL_VENV:-}" klone-eval-venv eval-venv; do
+  [ -n "$V" ] && [ -f "$V/bin/activate" ] && { source "$V/bin/activate"; echo ">>> venv: $V"; break; }
+done
+python -c "import swebench" 2>/dev/null || { echo ">>> ERROR: no eval venv found; run scripts/install_klone_eval_venv.sh" >&2; exit 1; }
 
 echo ">>> Scoring $RUN_ID from $PREDS (workers=$WORKERS, overlay=$OVERLAY_MODE, slice=${EVAL_SLICE:-all}, prefetch=${PREFETCH:-0})"
 EXTRA_ARGS=()
