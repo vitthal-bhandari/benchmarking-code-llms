@@ -153,6 +153,13 @@ def pull_image(image: str, sif_path: Path, retries: int = 2) -> tuple[bool, str]
     pulls into 125 (each unique image downloaded once) — essential to avoid the
     Hub pull-rate limit, and Klone scratch has room for the cache. Set
     NO_PULL_CACHE=1 to force --disable-cache (the old disk-tight behavior)."""
+    # Reuse a .sif that is already on disk. apptainer pull --force re-fetches the
+    # Docker Hub MANIFEST even when every layer is cached, and Hub counts that as
+    # a pull: scoring 9 runs x 99 instances is ~891 pulls against ~200/6h. Pair
+    # this with a shared APPTAINER_EVAL_SIFDIR and KEEP_SIF=1 so the images are
+    # fetched once and every later run is offline.
+    if sif_path.exists() and sif_path.stat().st_size > 0:
+        return True, "reused existing sif"
     no_cache = os.environ.get("NO_PULL_CACHE", "0") == "1"
     cmd = ["apptainer", "pull"]
     if no_cache:
@@ -388,20 +395,20 @@ def main():
     ids = [i for i in ids if i in specs]
 
     if args.prefetch_only:
-        log(f">>> PREFETCH: warming the Apptainer cache with {len(ids)} images, "
+        log(f">>> PREFETCH: building {len(ids)} images into {args.sif_dir}, "
             f"{args.workers} workers (no scoring)")
         Path(args.sif_dir).mkdir(parents=True, exist_ok=True)
         ok = fail = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {
                 ex.submit(pull_image, specs[iid].image,
-                          Path(args.sif_dir) / f"prefetch_{iid}.sif"): iid
+                          Path(args.sif_dir) / sif_name(specs[iid].image)): iid
                 for iid in ids
             }
             for fut in concurrent.futures.as_completed(futs):
                 iid = futs[fut]
                 success, _ = fut.result()
-                (Path(args.sif_dir) / f"prefetch_{iid}.sif").unlink(missing_ok=True)
+                pass  # keep the .sif: the scorer reuses it and pulls nothing
                 if success:
                     ok += 1
                     log(f"[cached] {iid}")
