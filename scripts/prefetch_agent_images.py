@@ -52,13 +52,23 @@ def pull(iid: str, outdir: Path, retries: int = 4) -> tuple[str, bool, str]:
         return iid, False, out.strip().splitlines()[-1] if out.strip() else f"exit {p.returncode}"
     return iid, False, "rate-limited after all retries"
 
+def default_sif_dir() -> Path:
+    """Scratch lives in a different place on each cluster — /gpfs/scrubbed on
+    Tillicum, /gscratch/scrubbed on Klone — so probe instead of hardcoding one."""
+    user = os.environ.get("USER", "")
+    for base in (f"/gpfs/scrubbed/{user}", f"/gscratch/scrubbed/{user}"):
+        if Path(base).is_dir():
+            return Path(base) / "swebench_sif"
+    return Path("swebench_sif").resolve()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instance-file", default="configs/mem_subset_99.txt")
-    ap.add_argument("--sif-dir", default=os.environ.get("SWEBENCH_SIF_DIR") or
-                    f"/gscratch/scrubbed/{os.environ.get('USER','')}/swebench_sif",
+    ap.add_argument("--sif-dir", default=None,
                     help="persistent dir for the built .sif files; the driver reads these "
-                         "instead of docker:// so runs never contact Docker Hub")
+                         "instead of docker:// so runs never contact Docker Hub. Defaults to "
+                         "scratch on whichever cluster this is.")
     ap.add_argument("--workers", type=int, default=2,
                     help="keep LOW: concurrency is what triggers the rate limit (default 2)")
     a = ap.parse_args()
@@ -74,7 +84,13 @@ def main() -> int:
     print(f">>> prefetching {len(ids)} images into {cache} with {a.workers} workers")
 
     ok = bad = 0
-    outdir = Path(a.sif_dir); outdir.mkdir(parents=True, exist_ok=True)
+    outdir = Path(a.sif_dir or os.environ.get("SWEBENCH_SIF_DIR") or default_sif_dir())
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"ERROR: cannot create sif dir {outdir}: {e}\n"
+              f"       pass --sif-dir <a writable path on this cluster>", file=sys.stderr)
+        return 2
     print(f">>> sif dir: {outdir}")
     if True:
         with ThreadPoolExecutor(max_workers=a.workers) as ex:
