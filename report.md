@@ -389,13 +389,34 @@ calibration 1.000 on every run; zero `CalledProcessError` (local-SIF fix).
 5. **Gemma is a different regime**: 35K peak vs 57K, far fewer deaths, highest
    submission rate; it solves in shorter trajectories and feels less pressure.
 
-### Pass@1 is NOT usable from this scoring round
-Resolve rates came out at 0.000-0.111 against ACM's 0.489 for the same model,
-which is implausible. Diagnosis: of 277 patches that existed but failed to apply,
-**195 (70%) failed on eval infrastructure** -- `Unable to create
-/testbed/.git/index.lock: File exists` and `failed to stat '/testbed': Not a
-directory` -- i.e. sandbox/overlay collisions under concurrency, not bad patches.
-Only 11 (4%) were genuine patch-context mismatches. Apply rate tracks the infra
-failures, not the arm: Qwen/none 80% (2 infra failures) vs Qwen/acm 25% (20).
-Re-score with `OVERLAY_MODE=tmpfs` and lower per-job concurrency before reporting
-any resolve rate.
+### Pass@1 (clean scoring round)
+The first scoring round was void: the overlay directory was keyed by instance_id
+inside the SHARED sif dir, so two runs grading the same instance mounted the same
+writable overlay. 195 of 277 apply-failures (70%) were sandbox collisions, and
+cached verdicts from that round could not be trusted either, since a contaminated
+/testbed can yield a wrong verdict rather than a crash. After moving the overlay
+under the per-run work_dir and re-grading all 891 with OVERWRITE=1, every job
+reports "no sandbox failures detected" and apply rates rose from 25-80% to
+67-100%.
+
+| Model | A1 none | A2 summarize | A3 acm (Base) |
+|---|--:|--:|--:|
+| Qwen3.5-9B | 0.172 | **0.374** | 0.303 |
+| MiMo-V2.6-Distill-Qwen-9B | 0.121 | 0.212 | **0.263** |
+| Gemma-4-12B-it | 0.293 | 0.273 | **0.384** |
+| *ACM paper, Qwen3.5-9B @128k* | *0.489* | *--* | *0.508* |
+
+1. **Memory management improves resolve rate on every model.** Best memory arm vs
+   A1: Qwen +118%, MiMo +117%, Gemma +31%. A3 beats A1 on all three.
+2. **A3 beats A2 on two of three models** (MiMo, Gemma); A2 wins on Qwen. With both
+   arms now firing at the identical trigger, that difference is mechanism only.
+3. **The effect is far larger than ACM report.** Their ReAct->Base gap is
+   0.489->0.508, just +3.9%, because at a 128K window SWE-Bench rarely applies
+   context pressure at all (median peak ~23k). At our imposed 64k budget the cap
+   actually binds -- A1 pins at the ceiling and loses 27-66 instances -- and the
+   benefit grows to +31-118%. **The value of context management is a function of
+   how tight the budget is**, which their single operating point cannot show.
+4. Absolute numbers sit below theirs (0.172 vs 0.489 for ReAct) for three known
+   reasons: a bash-only scaffold against their three tools (execute_bash,
+   str_replace_editor, submit_patch), a 64k budget against 128k, and a
+   99-instance subset chosen for context stress, i.e. harder than average.
