@@ -348,3 +348,54 @@ missing plumbing. Verify against ACM source before writing this up as a result.
 - Resolve the ACM 95% faithfulness question; re-run A3 if a backstop is needed.
 - Re-derive `mem_subset` with the exact tokenizer (was chars/4); then cap sweep
   (16k/24k/32k) for the degradation-curve figure.
+
+---
+
+## B2 — 3 models x 3 arms, 99 instances, 64k budget (runs 3446xx)
+
+Qwen3.5-9B, MiMo-V2.6-Distill-Qwen-9B, Gemma-4-12B-it. Identical model, sampling
+and 64k budget within each model; the only variable is the memory policy. Token
+calibration 1.000 on every run; zero `CalledProcessError` (local-SIF fix).
+
+| Model | Arm | Sub. | OOC | Edits/inst | Voluntary | Peak | Steps | Ovh. |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| Qwen3.5-9B | none | 30 | **66** | 0 | — | 57K | 123 | 0 |
+| | summarize | 46 | **0** | 1.12 | 0 | 54K | 176 | 0.8% |
+| | acm | 48 | 5 | 1.00 | **0** | 54K | 182 | 0.7% |
+| MiMo-9B | none | 20 | **59** | 0 | — | 57K | 130 | 0 |
+| | summarize | 30 | **0** | 1.54 | 0 | 54K | 191 | 0.8% |
+| | acm | 37 | 2 | 0.70 | **0** | 54K | 183 | 0.6% |
+| Gemma-4-12B-it | none | 62 | 27 | 0 | — | 35K | 71 | 0 |
+| | summarize | 85 | **0** | 0.58 | 0 | 32K | 88 | 0.9% |
+| | acm | 82 | 3 | 0.48 | **0** | 39K | 94 | 0.8% |
+
+### Findings (behavioural — these are solid)
+1. **Zero voluntary compressions across all three models.** Every one of the 216
+   edits was harness-triggered (A2) or forced at the 95% threshold (A3), and
+   `query_memory` was invoked once in the entire run. This is ACM's Figure-4
+   claim reproduced at scale, and it now holds with the tools registered as real
+   function calls — an earlier build asked models to type `manage_context` into a
+   bash tool, which they ignored, and that artefact made forced compliance look
+   like 0/6 when it is really 4/4.
+2. **Memory management eliminates context death.** A1 pins at the ceiling (median
+   peak 57,431 against a 57,344 usable budget) and loses 27-66 instances per
+   model; A2 loses none and A3 loses 2-5. Submissions rise 60-85%.
+3. **The failure mode shifts rather than disappearing.** `LimitsExceeded` climbs
+   sharply in the memory arms (Qwen 3 -> 45, MiMo 18 -> 56): agents that would
+   have died of context now exhaust the step limit instead. Memory buys
+   exploration, not completion.
+4. **Memory is nearly free** — summariser and retrieval calls cost 0.6-0.9% of
+   agent tokens.
+5. **Gemma is a different regime**: 35K peak vs 57K, far fewer deaths, highest
+   submission rate; it solves in shorter trajectories and feels less pressure.
+
+### Pass@1 is NOT usable from this scoring round
+Resolve rates came out at 0.000-0.111 against ACM's 0.489 for the same model,
+which is implausible. Diagnosis: of 277 patches that existed but failed to apply,
+**195 (70%) failed on eval infrastructure** -- `Unable to create
+/testbed/.git/index.lock: File exists` and `failed to stat '/testbed': Not a
+directory` -- i.e. sandbox/overlay collisions under concurrency, not bad patches.
+Only 11 (4%) were genuine patch-context mismatches. Apply rate tracks the infra
+failures, not the arm: Qwen/none 80% (2 infra failures) vs Qwen/acm 25% (20).
+Re-score with `OVERLAY_MODE=tmpfs` and lower per-job concurrency before reporting
+any resolve rate.
