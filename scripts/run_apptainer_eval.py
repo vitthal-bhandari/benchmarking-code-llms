@@ -447,6 +447,7 @@ def main():
     Path(args.report_dir).mkdir(parents=True, exist_ok=True)
     out_path = Path(args.report_dir) / f"{args.run_id}.json"
     out_path.write_text(json.dumps(summary, indent=2))
+    warn_on_infra_failures(args.logs_dir, args.run_id)
 
     log("\n" + "=" * 60)
     log(f"Run: {args.run_id}  (backend: apptainer)")
@@ -460,6 +461,32 @@ def main():
     log(f"  errors:     {summary['error_instances']}")
     log(f"Report -> {out_path}")
     log("=" * 60)
+
+
+def warn_on_infra_failures(logs_dir: str, run_id: str) -> None:
+    """A scoring round is only meaningful if the sandbox behaved. Infra failures
+    (overlay collisions, broken binds) silently corrupt verdicts as well as
+    crashing, so surface the count instead of letting it hide in per-instance
+    logs -- an overlay-sharing bug once accounted for 70% of apply failures and
+    was only caught by reading apply.log by hand."""
+    import glob as _g, json as _j
+    INFRA = ("index.lock", "failed to stat '/testbed'", "Not a directory")
+    bad = []
+    for rp in _g.glob(f"{logs_dir}/{run_id}/*/report.json"):
+        try:
+            r = _j.load(open(rp))
+        except Exception:
+            continue
+        if r.get("patch_exists") and not r.get("patch_successfully_applied"):
+            al = Path(rp).parent / "apply.log"
+            if al.exists() and any(k in al.read_text() for k in INFRA):
+                bad.append(Path(rp).parent.name)
+    if bad:
+        log(f">>> WARNING: {len(bad)} instance(s) failed on SANDBOX INFRASTRUCTURE, "
+            f"not on the patch. These verdicts are not trustworthy; fix the cause "
+            f"and re-score with OVERWRITE=1. e.g. {bad[:3]}")
+    else:
+        log(">>> infra check: no sandbox failures detected")
 
 
 if __name__ == "__main__":
