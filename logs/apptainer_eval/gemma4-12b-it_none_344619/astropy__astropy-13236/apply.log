@@ -1,17 +1,105 @@
 Checking patch astropy/table/table.py...
-error: astropy/table/table.py: Not a directory
-error: --3way outside a repository
+Applied patch astropy/table/table.py cleanly.
 Checking patch astropy/table/table.py...
-error: astropy/table/table.py: Not a directory
-can't find file to patch at input line 5
-Perhaps you used the wrong -p or --strip option?
-The text leading up to this was:
---------------------------
-|diff --git a/astropy/table/table.py b/astropy/table/table.py
-|index 5afe2127a..232b2f453 100644
-|--- a/astropy/table/table.py
-|+++ b/astropy/table/table.py
---------------------------
-No file to patch.  Skipping patch.
-patch: **** Can't create temporary file /gscratch/scrubbed/vitthal1/tmp/poGR9z0e : No such file or directory
-error: astropy/table/table.py: Not a directory
+error: while searching for:
+
+        self._init_from_cols(cols)
+
+    def _convert_data_to_col(self, data, copy=True, default_name=None, dtype=None, name=None):
+        """
+        Convert any allowed sequence data ``col`` to a column object that can be used
+        directly in the self.columns dict.  This could be a Column, MaskedColumn,
+        or mixin column.
+
+        The final column name is determined by::
+
+            name or data.info.name or def_name
+
+        If ``data`` has no ``info`` then ``name = name or def_name``.
+
+        The behavior of ``copy`` for Column objects is:
+        - copy=True: new class instance with a copy of data and deep copy of meta
+        - copy=False: new class instance with same data and a key-only copy of meta
+
+        For mixin columns:
+        - copy=True: new class instance with copy of data and deep copy of meta
+        - copy=False: original instance (no copy at all)
+
+        Parameters
+        ----------
+        data : object (column-like sequence)
+            Input column data
+        copy : bool
+            Make a copy
+        default_name : str
+            Default name
+        dtype : np.dtype or None
+            Data dtype
+        name : str or None
+            Column name
+
+        Returns
+        -------
+        col : Column, MaskedColumn, mixin-column type
+            Object that can be used as a column in self
+        """
+
+        data_is_mixin = self._is_mixin_for_table(data)
+        masked_col_cls = (self.ColumnClass
+                          if issubclass(self.ColumnClass, self.MaskedColumn)
+                          else self.MaskedColumn)
+
+        try:
+            data0_is_mixin = self._is_mixin_for_table(data[0])
+        except Exception:
+            # Need broad exception, cannot predict what data[0] raises for arbitrary data
+            data0_is_mixin = False
+
+        # If the data is not an instance of Column or a mixin class, we can
+        # check the registry of mixin 'handlers' to see if the column can be
+        # converted to a mixin class
+        if (handler := get_mixin_handler(data)) is not None:
+            original_data = data
+            data = handler(data)
+            if not (data_is_mixin := self._is_mixin_for_table(data)):
+                fully_qualified_name = (original_data.__class__.__module__ + '.'
+                                        + original_data.__class__.__name__)
+                raise TypeError('Mixin handler for object of type '
+                                f'{fully_qualified_name} '
+                                'did not return a valid mixin column')
+
+        # Structured ndarray gets viewed as a mixin unless already a valid
+        # mixin class
+        if (not isinstance(data, Column) and not data_is_mixin
+                and isinstance(data, np.ndarray) and len(data.dtype) > 1):
+            data = data.view(NdarrayMixin)
+            data_is_mixin = True
+
+        # Get the final column name using precedence.  Some objects may not
+        # have an info attribute. Also avoid creating info as a side effect.
+        if not name:
+            if isinstance(data, Column):
+                name = data.name or default_name
+            elif 'info' in getattr(data, '__dict__', ()):
+                name = data.info.name or default_name
+            else:
+                name = default_name
+
+        if isinstance(data, Column):
+            # If self.ColumnClass is a subclass of col, then "upgrade" to ColumnClass,
+            # otherwise just use the original class.  The most common case is a
+            # table with masked=True and ColumnClass=MaskedColumn.  Then a Column
+            # gets upgraded to MaskedColumn, but the converse (pre-4.0) behavior
+            # of downgrading from MaskedColumn to Column (for non-masked table)
+            # does not happen.
+            col_cls = self._get_col_cls_for_table(data)
+
+        elif data_is_mixin:
+            # Copy the mixin column attributes if they exist since the copy below
+            # may not get this attribute.
+            col = col_copy(data, copy_indices=self._init_indices) if copy
+error: patch failed: astropy/table/table.py:1176
+error: astropy/table/table.py: patch does not apply
+Checking patch astropy/table/table.py...
+Applied patch to 'astropy/table/table.py' cleanly.
+Applied patch astropy/table/table.py cleanly.

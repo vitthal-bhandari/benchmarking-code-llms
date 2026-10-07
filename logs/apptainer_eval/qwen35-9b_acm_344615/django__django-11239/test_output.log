@@ -129,7 +129,10 @@ export CONDA_PYTHON_EXE='\''/opt/miniconda3/bin/python'\'''
 + hash -r
 + cd /testbed
 + sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen
-sed: couldn't open temporary file /etc/sed3F8HwL: Invalid argument
++ locale-gen
+Generating locales (this might take a while)...
+  en_US.UTF-8... done
+Generation complete.
 + export LANG=en_US.UTF-8
 + LANG=en_US.UTF-8
 + export LANGUAGE=en_US:en
@@ -146,11 +149,6 @@ Changes not staged for commit:
   (use "git add <file>..." to update what will be committed)
   (use "git restore <file>..." to discard changes in working directory)
 	modified:   django/db/backends/postgresql/client.py
-	modified:   tests/dbshell/test_postgresql.py
-
-Untracked files:
-  (use "git add <file>..." to include in what will be committed)
-	django/db/backends/postgresql/client.py.orig
 
 no changes added to commit (use "git add" and/or "git commit -a")
 + git show
@@ -161,10 +159,10 @@ Date:   Thu Aug 13 01:01:15 2026 +0000
     SWE-bench
 + git -c core.fileMode=false diff d87bd29c4f8dfcdf3f4a4eb8340e6770a2416fe3
 diff --git a/django/db/backends/postgresql/client.py b/django/db/backends/postgresql/client.py
-index cf4df76882..7decf8c053 100644
+index cf4df76882..f31ac75e40 100644
 --- a/django/db/backends/postgresql/client.py
 +++ b/django/db/backends/postgresql/client.py
-@@ -17,19 +17,48 @@ class DatabaseClient(BaseDatabaseClient):
+@@ -17,6 +17,10 @@ class DatabaseClient(BaseDatabaseClient):
          dbname = conn_params.get('database', '')
          user = conn_params.get('user', '')
          passwd = conn_params.get('password', '')
@@ -172,21 +170,10 @@ index cf4df76882..7decf8c053 100644
 +        sslrootcert = conn_params.get('sslrootcert', '')
 +        sslcert = conn_params.get('sslcert', '')
 +        sslkey = conn_params.get('sslkey', '')
-+        sslrootcert = conn_params.get('sslrootcert', '')
-+        sslcert = conn_params.get('sslcert', '')
-+        sslkey = conn_params.get('sslkey', '')
  
          if user:
              args += ['-U', user]
-         if host:
-+        if sslmode:
-+            args += ['--sslmode', sslmode]
-+        if sslrootcert:
-+            args += ['--sslrootcert', sslrootcert]
-+        if sslcert:
-+            args += ['--sslcert', sslcert]
-+        if sslkey:
-+            args += ['--sslkey', sslkey]
+@@ -24,6 +28,14 @@ class DatabaseClient(BaseDatabaseClient):
              args += ['-h', host]
          if port:
              args += ['-p', str(port)]
@@ -201,100 +188,6 @@ index cf4df76882..7decf8c053 100644
          args += [dbname]
  
          sigint_handler = signal.getsignal(signal.SIGINT)
-         subprocess_env = os.environ.copy()
-         if passwd:
-             subprocess_env['PGPASSWORD'] = str(passwd)
-+        if sslrootcert:
-+            subprocess_env['PGSSLROOTCERT'] = str(sslrootcert)
-+        if sslcert:
-+            subprocess_env['PGSSLCERT'] = str(sslcert)
-+        if sslkey:
-+            subprocess_env['PGSSLKEY'] = str(sslkey)
-         try:
-             # Allow SIGINT to pass to psql to abort queries.
-             signal.signal(signal.SIGINT, signal.SIG_IGN)
-diff --git a/tests/dbshell/test_postgresql.py b/tests/dbshell/test_postgresql.py
-index a33e7f6482..da6cc167bf 100644
---- a/tests/dbshell/test_postgresql.py
-+++ b/tests/dbshell/test_postgresql.py
-@@ -18,11 +18,16 @@ class PostgreSqlDbshellCommandTestCase(SimpleTestCase):
-         """
-         def _mock_subprocess_run(*args, env=os.environ, **kwargs):
-             self.subprocess_args = list(*args)
-+            self.environment = {
-+                key: env.get(key)
-+                for key in ('PGPASSWORD', 'PGSSLROOTCERT', 'PGSSLCERT', 'PGSSLKEY')
-+                if env.get(key)
-+            }
-             self.pgpassword = env.get('PGPASSWORD')
-             return subprocess.CompletedProcess(self.subprocess_args, 0)
-         with mock.patch('subprocess.run', new=_mock_subprocess_run):
-             DatabaseClient.runshell_db(dbinfo)
--        return self.subprocess_args, self.pgpassword
-+        return self.subprocess_args, self.environment
- 
-     def test_basic(self):
-         self.assertEqual(
-@@ -34,7 +39,7 @@ class PostgreSqlDbshellCommandTestCase(SimpleTestCase):
-                 'port': '444',
-             }), (
-                 ['psql', '-U', 'someuser', '-h', 'somehost', '-p', '444', 'dbname'],
--                'somepassword',
-+                {'PGPASSWORD': 'somepassword'},
-             )
-         )
- 
-@@ -47,7 +52,7 @@ class PostgreSqlDbshellCommandTestCase(SimpleTestCase):
-                 'port': '444',
-             }), (
-                 ['psql', '-U', 'someuser', '-h', 'somehost', '-p', '444', 'dbname'],
--                None,
-+                {},
-             )
-         )
- 
-@@ -61,7 +66,7 @@ class PostgreSqlDbshellCommandTestCase(SimpleTestCase):
-                 'port': '444',
-             }), (
-                 ['psql', '-U', 'some:user', '-h', '::1', '-p', '444', 'dbname'],
--                'some:password',
-+                {'PGPASSWORD': 'some:password'},
-             )
-         )
- 
-@@ -77,7 +82,31 @@ class PostgreSqlDbshellCommandTestCase(SimpleTestCase):
-                 'port': '444',
-             }), (
-                 ['psql', '-U', username, '-h', 'somehost', '-p', '444', 'dbname'],
--                password,
-+                {'PGPASSWORD': password},
-+            )
-+        )
-+
-+    def test_ssl_connection(self):
-+        username = 'rôle'
-+        password = 'sésame'
-+        self.assertEqual(
-+            self._run_it({
-+                'database': 'dbname',
-+                'user': username,
-+                'password': password,
-+                'host': 'somehost',
-+                'port': '444',
-+                'sslrootcert': '/path/to/rootcert',
-+                'sslcert': '/path/to/cert',
-+                'sslkey': '/path/to/key',
-+            }), (
-+                ['psql', '-U', username, '-h', 'somehost', '-p', '444', 'dbname'],
-+                {
-+                    'PGPASSWORD': password,
-+                    'PGSSLROOTCERT': '/path/to/rootcert',
-+                    'PGSSLCERT': '/path/to/cert',
-+                    'PGSSLKEY': '/path/to/key',
-+                }
-             )
-         )
- 
 + source /opt/miniconda3/bin/activate
 ++ _CONDA_ROOT=/opt/miniconda3
 ++ . /opt/miniconda3/etc/profile.d/conda.sh
@@ -432,90 +325,66 @@ Installing collected packages: Django
 Successfully installed Django-3.0.dev20260813010115
 WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv
 + git checkout d87bd29c4f8dfcdf3f4a4eb8340e6770a2416fe3 tests/dbshell/test_postgresql.py
-fatal: Unable to create '/testbed/.git/index.lock': File exists.
-
-Another git process seems to be running in this repository, e.g.
-an editor opened by 'git commit'. Please make sure all processes
-are terminated then try again. If it still fails, a git process
-may have crashed in this repository earlier:
-remove the file manually to continue.
+Updated 0 paths from e878f4755b
 + git apply -v -
 Checking patch tests/dbshell/test_postgresql.py...
-error: while searching for:
-        That function invokes the runshell command, while mocking
-        subprocess.run(). It returns a 2-tuple with:
-        - The command line list
-        - The the value of the PGPASSWORD environment variable, or None.
-        """
-        def _mock_subprocess_run(*args, env=os.environ, **kwargs):
-            self.subprocess_args = list(*args)
-            self.pgpassword = env.get('PGPASSWORD')
-            return subprocess.CompletedProcess(self.subprocess_args, 0)
-        with mock.patch('subprocess.run', new=_mock_subprocess_run):
-            DatabaseClient.runshell_db(dbinfo)
-        return self.subprocess_args, self.pgpassword
-
-    def test_basic(self):
-        self.assertEqual(
-
-error: patch failed: tests/dbshell/test_postgresql.py:14
-error: tests/dbshell/test_postgresql.py: patch does not apply
+Applied patch tests/dbshell/test_postgresql.py cleanly.
 + : '>>>>> Start Test Output'
 + ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 dbshell.test_postgresql
-Testing against Django installed in '/testbed/django'
+test_accent (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase) ... ok
+test_basic (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase) ... ok
+test_column (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase) ... ok
+test_nopass (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase) ... ok
+test_sigint_handler (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase)
+SIGINT is ignored in Python and passed to psql to abort quries. ... ok
+test_ssl_certificate (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase) ... FAIL
+
+======================================================================
+FAIL: test_ssl_certificate (dbshell.test_postgresql.PostgreSqlDbshellCommandTestCase)
+----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "./tests/runtests.py", line 509, in <module>
-    options.exclude_tags,
-  File "./tests/runtests.py", line 275, in django_tests
-    state = setup(verbosity, test_labels, parallel)
-  File "./tests/runtests.py", line 187, in setup
-    django.setup()
-  File "/testbed/django/__init__.py", line 24, in setup
-    apps.populate(settings.INSTALLED_APPS)
-  File "/testbed/django/apps/registry.py", line 114, in populate
-    app_config.import_models()
-  File "/testbed/django/apps/config.py", line 211, in import_models
-    self.models_module = import_module(models_module_name)
-  File "/opt/miniconda3/envs/testbed/lib/python3.6/importlib/__init__.py", line 126, in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-  File "<frozen importlib._bootstrap>", line 994, in _gcd_import
-  File "<frozen importlib._bootstrap>", line 971, in _find_and_load
-  File "<frozen importlib._bootstrap>", line 955, in _find_and_load_unlocked
-  File "<frozen importlib._bootstrap>", line 665, in _load_unlocked
-  File "<frozen importlib._bootstrap_external>", line 678, in exec_module
-  File "<frozen importlib._bootstrap>", line 219, in _call_with_frames_removed
-  File "/testbed/django/contrib/auth/models.py", line 2, in <module>
-    from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
-  File "/testbed/django/contrib/auth/base_user.py", line 47, in <module>
-    class AbstractBaseUser(models.Model):
-  File "/testbed/django/db/models/base.py", line 117, in __new__
-    new_class.add_to_class('_meta', Options(meta, app_label))
-  File "/testbed/django/db/models/base.py", line 321, in add_to_class
-    value.contribute_to_class(cls, name)
-  File "/testbed/django/db/models/options.py", line 202, in contribute_to_class
-    self.db_table = truncate_name(self.db_table, connection.ops.max_name_length())
-  File "/testbed/django/db/__init__.py", line 28, in __getattr__
-    return getattr(connections[DEFAULT_DB_ALIAS], item)
-  File "/testbed/django/db/utils.py", line 201, in __getitem__
-    backend = load_backend(db['ENGINE'])
-  File "/testbed/django/db/utils.py", line 110, in load_backend
-    return import_module('%s.base' % backend_name)
-  File "/opt/miniconda3/envs/testbed/lib/python3.6/importlib/__init__.py", line 126, in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-  File "/testbed/django/db/backends/sqlite3/base.py", line 14, in <module>
-    from sqlite3 import dbapi2 as Database
-  File "/opt/miniconda3/envs/testbed/lib/python3.6/sqlite3/__init__.py", line 23, in <module>
-    from sqlite3.dbapi2 import *
-ModuleNotFoundError: No module named 'sqlite3.dbapi2'
+  File "/testbed/tests/dbshell/test_postgresql.py", line 72, in test_ssl_certificate
+    'PGSSLROOTCERT': 'root.crt',
+AssertionError: Tuples differ: (['ps[50 chars]4', '--sslmode', 'verify-ca', '--sslrootcert',[75 chars], {}) != (['ps[50 chars]4', 'dbname'], {'PGSSLCERT': 'client.crt', 'PG[73 chars]rt'})
+
+First differing element 0:
+['psq[49 chars]4', '--sslmode', 'verify-ca', '--sslrootcert',[70 chars]ame']
+['psq[49 chars]4', 'dbname']
+
++ (['psql', '-U', 'someuser', '-h', 'somehost', '-p', '444', 'dbname'],
++  {'PGSSLCERT': 'client.crt',
++   'PGSSLKEY': 'client.key',
++   'PGSSLMODE': 'verify-ca',
++   'PGSSLROOTCERT': 'root.crt'})
+- (['psql',
+-   '-U',
+-   'someuser',
+-   '-h',
+-   'somehost',
+-   '-p',
+-   '444',
+-   '--sslmode',
+-   'verify-ca',
+-   '--sslrootcert',
+-   'root.crt',
+-   '--sslcert',
+-   'client.crt',
+-   '--sslkey',
+-   'client.key',
+-   'dbname'],
+-  {})
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.003s
+
+FAILED (failures=1)
+Testing against Django installed in '/testbed/django'
+Importing application dbshell
+Skipping setup of unused database(s): default, other.
+System check identified no issues (0 silenced).
 + SWEBENCH_TEST_EXIT_CODE=1
 + : '>>>>> End Test Output'
 + echo '>>>>> Test Exit Code: 1'
 >>>>> Test Exit Code: 1
 + git checkout d87bd29c4f8dfcdf3f4a4eb8340e6770a2416fe3 tests/dbshell/test_postgresql.py
-fatal: Unable to create '/testbed/.git/index.lock': File exists.
-
-Another git process seems to be running in this repository, e.g.
-an editor opened by 'git commit'. Please make sure all processes
-are terminated then try again. If it still fails, a git process
-may have crashed in this repository earlier:
-remove the file manually to continue.
+Updated 1 path from e878f4755b

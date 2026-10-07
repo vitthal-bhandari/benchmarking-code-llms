@@ -141,7 +141,6 @@ Generation complete.
 + LC_ALL=en_US.UTF-8
 /swebench_eval/eval.sh: line 9: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8)
 + git config --global --add safe.directory /testbed
-error: could not lock config file /root/.gitconfig: File exists
 + cd /testbed
 + git status
 On branch main
@@ -159,68 +158,10 @@ Date:   Thu Aug 13 00:59:02 2026 +0000
     SWE-bench
 + git -c core.fileMode=false diff 8180ffba21bf10f4be905cb0d4890dc2bcff2788
 diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
-index 3a462f1c4c..43f845fcba 100644
+index 3a462f1c4c..db8d203192 100644
 --- a/django/db/models/deletion.py
 +++ b/django/db/models/deletion.py
-@@ -1,4 +1,5 @@
- from collections import Counter
-+from itertools import chain
- from operator import attrgetter
- 
- from django.db import IntegrityError, connections, transaction
-@@ -116,6 +117,13 @@ class Collector:
-             model, {}).setdefault(
-             (field, value), set()).update(objs)
- 
-+    def _has_signal_listeners(self, model):
-+        return (
-+            signals.pre_delete.has_listeners(model) or
-+            signals.post_delete.has_listeners(model) or
-+            signals.m2m_changed.has_listeners(model)
-+        )
-+
-     def can_fast_delete(self, objs, from_field=None):
-         """
-         Determine if the objects in the given queryset-like or single object
-@@ -135,9 +143,7 @@ class Collector:
-             model = objs.model
-         else:
-             return False
--        if (signals.pre_delete.has_listeners(model) or
--                signals.post_delete.has_listeners(model) or
--                signals.m2m_changed.has_listeners(model)):
-+        if self._has_signal_listeners(model):
-             return False
-         # The use of from_field comes from the need to avoid cascade back to
-         # parent when parent delete is cascading to child.
-@@ -220,8 +226,24 @@ class Collector:
-                     sub_objs = self.related_objects(related, batch)
-                     if self.can_fast_delete(sub_objs, from_field=field):
-                         self.fast_deletes.append(sub_objs)
--                    elif sub_objs:
--                        field.remote_field.on_delete(self, field, sub_objs, self.using)
-+                    else:
-+                        related_model = related.related_model
-+                        # Non-referenced fields can be deferred if no signal
-+                        # receivers are connected for the related model as
-+                        # they'll never be exposed to the user. Skip field
-+                        # deferring when some relationships are select_related
-+                        # as interactions between both features are hard to
-+                        # get right. This should only happen in the rare
-+                        # cases where .related_objects is overridden anyway.
-+                        if not (sub_objs.query.select_related or
-+                                self._has_signal_listeners(related_model)):
-+                            referenced_fields = set(chain.from_iterable(
-+                                (rf.attname for rf in rel.field.foreign_related_fields)
-+                                for rel in get_candidate_relations_to_delete(related_model._meta)
-+                            ))
-+                            sub_objs = sub_objs.only(*tuple(referenced_fields))
-+                        if sub_objs:
-+                            field.remote_field.on_delete(self, field, sub_objs, self.using)
-             for field in model._meta.private_fields:
-                 if hasattr(field, 'bulk_related_objects'):
-                     # It's something like generic foreign key.
-@@ -232,7 +254,7 @@ class Collector:
+@@ -232,7 +232,7 @@ class Collector:
          """
          Get a QuerySet of objects related to `objs` via the relation `related`.
          """
@@ -366,7 +307,7 @@ Installing collected packages: Django
 Successfully installed Django-3.0.dev20260813005902
 WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv
 + git checkout 8180ffba21bf10f4be905cb0d4890dc2bcff2788 tests/delete/models.py tests/delete/tests.py
-fatal: Unable to create '/testbed/.git/index.lock': Invalid argument
+Updated 0 paths from 1c79d4e861
 + git apply -v -
 Checking patch tests/delete/models.py...
 Checking patch tests/delete/tests.py...
@@ -387,7 +328,8 @@ test_large_delete (delete.tests.DeletionTests) ... ok
 test_large_delete_related (delete.tests.DeletionTests) ... ok
 test_m2m (delete.tests.DeletionTests) ... ok
 test_model_delete_returns_num_rows (delete.tests.DeletionTests) ... ok
-test_only_referenced_fields_selected (delete.tests.DeletionTests) ... test_proxied_model_duplicate_queries (delete.tests.DeletionTests) ... ok
+test_only_referenced_fields_selected (delete.tests.DeletionTests) ... FAIL
+test_proxied_model_duplicate_queries (delete.tests.DeletionTests) ... ok
 test_queryset_delete_returns_num_rows (delete.tests.DeletionTests) ... ok
 test_relational_post_delete_signals_happen_before_parent_object (delete.tests.DeletionTests) ... ERROR
 test_fast_delete_empty_no_update_can_self_select (delete.tests.FastDeleteTests) ... ok
@@ -426,7 +368,7 @@ Traceback (most recent call last):
     r.delete()
   File "/testbed/django/db/models/base.py", line 919, in delete
     return collector.delete()
-  File "/testbed/django/db/models/deletion.py", line 339, in delete
+  File "/testbed/django/db/models/deletion.py", line 317, in delete
     sender=model, instance=obj, using=self.using
   File "/testbed/django/dispatch/dispatcher.py", line 175, in send
     for receiver in self._live_receivers(sender)
@@ -443,25 +385,22 @@ Traceback (most recent call last):
 delete.models.S.DoesNotExist: S matching query does not exist.
 
 ======================================================================
-FAIL: test_only_referenced_fields_selected (delete.tests.DeletionTests) (signal='pre_delete')
+FAIL: test_only_referenced_fields_selected (delete.tests.DeletionTests)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/testbed/tests/delete/tests.py", line 470, in test_only_referenced_fields_selected
-    ctx.captured_queries[0]['sql'],
-AssertionError: '"large_field"' not found in 'SELECT "delete_referrer"."id" FROM "delete_referrer" WHERE "delete_referrer"."origin_id" IN (2)'
+  File "/testbed/tests/delete/tests.py", line 455, in test_only_referenced_fields_selected
+    self.assertEqual(ctx.captured_queries[0]['sql'], expected_sql)
+AssertionError: 'SELE[20 chars]."id" FROM "delete_referrer" WHERE "delete_ref[21 chars] (1)' != 'SELE[20 chars]."id", "delete_referrer"."unique_field" FROM "[55 chars] (1)'
+- SELECT "delete_referrer"."id" FROM "delete_referrer" WHERE "delete_referrer"."origin_id" IN (1)
+?                              ^^^^^
++ SELECT "delete_referrer"."id", "delete_referrer"."unique_field" FROM "delete_referrer" WHERE "delete_referrer"."origin_id" IN (1)
+?                              ^                  ++++++++++++++++++++++++++++++++++++++
 
-======================================================================
-FAIL: test_only_referenced_fields_selected (delete.tests.DeletionTests) (signal='post_delete')
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "/testbed/tests/delete/tests.py", line 470, in test_only_referenced_fields_selected
-    ctx.captured_queries[0]['sql'],
-AssertionError: '"large_field"' not found in 'SELECT "delete_referrer"."id" FROM "delete_referrer" WHERE "delete_referrer"."origin_id" IN (3)'
 
 ----------------------------------------------------------------------
-Ran 43 tests in 0.845s
+Ran 43 tests in 0.767s
 
-FAILED (failures=2, errors=1, skipped=1)
+FAILED (failures=1, errors=1, skipped=1)
 Destroying test database for alias 'default' ('file:memorydb_default?mode=memory&cache=shared')...
 Testing against Django installed in '/testbed/django'
 Importing application delete
@@ -511,4 +450,4 @@ System check identified no issues (0 silenced).
 + echo '>>>>> Test Exit Code: 1'
 >>>>> Test Exit Code: 1
 + git checkout 8180ffba21bf10f4be905cb0d4890dc2bcff2788 tests/delete/models.py tests/delete/tests.py
-fatal: Unable to create '/testbed/.git/index.lock': Invalid argument
+Updated 2 paths from 1c79d4e861
