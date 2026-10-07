@@ -246,7 +246,15 @@ def evaluate_instance(
     overlay_dir = None
     exec_cmd = ["apptainer", "exec", "--fakeroot"]
     if args.overlay_mode == "overlay":
-        overlay_dir = Path(args.sif_dir) / f"overlay_{instance_id}"
+        # Under work_dir (per RUN_ID), NOT sif_dir. sif_dir is deliberately
+        # shared across runs so images are fetched once; putting the overlay
+        # there too meant two runs grading the same instance concurrently
+        # mounted the SAME overlay, which produced
+        #   fatal: Unable to create '/testbed/.git/index.lock': File exists
+        #   fatal: failed to stat '/testbed': Not a directory
+        # and accounted for 70% of all patch-apply failures in the first scoring
+        # round. inst_dir is already unique per (run, instance).
+        overlay_dir = inst_dir / "overlay"
         overlay_dir.mkdir(parents=True, exist_ok=True)
         exec_cmd += ["--overlay", str(overlay_dir)]
     else:  # tmpfs -- RAM-backed fallback (capped by apptainer.conf / job mem)
