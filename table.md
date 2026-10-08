@@ -13,6 +13,6 @@
 | A2 Summarize-on-threshold | \textbf{0.374} | 176.6 | 175.7 | 54K | 26K | 35K | 1.12 | 46 | 0 |
 | A3 ACM Base (untrained) | 0.303 | 182.9 | 182.4 | 54K | 25K | 37K | 1 | 48 | 5 |
 | **Reference: ACM paper, Qwen3.5-9B base** | | | | | | | | | |
-| \textit{ReAct (ACM paper)} | 0.489 | 74.7 | 59K | -- | -- | -- | -- | -- | -- |
-| \textit{ACM Base (ACM paper)} | 0.508 | 77.6 | 46K | -- | -- | -- | -- | -- | -- |
-| \textit{ACM Post-Trained (paper)} | 0.530 | 79.3 | 50K | -- | -- | -- | -- | -- | -- |
+| \textit{ReAct (ACM paper)} | 0.489 | 74.7 | -- | 59K | -- | -- | -- | -- | -- |
+| \textit{ACM Base (ACM paper)} | 0.508 | 77.6 | -- | 46K | -- | -- | -- | -- | -- |
+| \textit{ACM Post-Trained (paper)} | 0.530 | 79.3 | -- | 50K | -- | -- | -- | -- | -- |
