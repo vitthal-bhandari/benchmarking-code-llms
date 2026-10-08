@@ -55,6 +55,8 @@ def load(run_dir: str, eval_root: str | None) -> dict | None:
         "edits": edits, "edits_per": round(edits / n, 2),
         "vol": trig.count("voluntary"), "forced": trig.count("forced"), "harness": trig.count("harness"),
         "peak": int(st.median(g("peak_ctx_tokens"))),
+        "avgctx": int(st.mean(g("avg_ctx_tokens"))),
+        "finalctx": int(st.median(g("final_ctx_tokens"))),
         "util": round(st.mean([r.get("ctx_utilization") or 0 for r in rows]), 3),
         "growth": int(st.mean(g("growth_per_step"))),
         "obs_mean": int(st.mean(g("obs_tokens_mean"))), "obs_p90": int(st.median(g("obs_tokens_p90"))),
@@ -66,8 +68,8 @@ def load(run_dir: str, eval_root: str | None) -> dict | None:
 # ACM Table 2 reports Pass@1 / Tools / Peak Tok.; we mirror those three and add
 # the memory-specific columns their table has no column for.
 COLS = [("arm","Method",None),("resolved_rate","Pass@1","p"),("tool_calls","Tools","f"),
-        ("peak","Peak Tok.","K"),("edits_per","Edits","f"),("vol","Vol.","d"),
-        ("util","Util.","f"),("overhead","Ovh.","f"),("steps","Steps","f"),
+        ("steps","Steps","f"),("peak","Peak","K"),("avgctx","Avg","K"),
+        ("finalctx","Final","K"),("edits_per","Edits","f"),
         ("submitted","Sub.","d"),("ctx_death","OOC","d")]
 
 ARM_LABEL = {"none": "A1 ReAct (no memory)", "summarize": "A2 Summarize-on-threshold",
@@ -119,12 +121,22 @@ def main():
         r["_model"] = model_of(r["run"])
     rows.sort(key=lambda r: (r["_model"], ARM_ORDER.get(r["policy"], 9)))
 
+    # best Pass@1 within each model, so "which arm wins" is readable at a glance
+    best = {}
+    for r in rows:
+        v = r.get("resolved_rate")
+        if v is not None and v > best.get(r["_model"], (-1, None))[0]:
+            best[r["_model"]] = (v, r["run"])
+
     body, cur = [], None
     for r in rows:
         if r["_model"] != cur:
             cur = r["_model"]
             body.append(("GROUP", PRETTY.get(cur, cur)))
-        body.append(("ROW", [fmt(r.get(k), t) for k, _, t in COLS]))
+        cells = [fmt(r.get(k), t) for k, _, t in COLS]
+        if best.get(r["_model"], (None, None))[1] == r["run"]:
+            cells[1] = r"\textbf{%s}" % cells[1]
+        body.append(("ROW", cells))
     body.append(("GROUP", "Reference: ACM paper, Qwen3.5-9B base"))
     for name, pa, tl, pk in ACM_REF:
         body.append(("ROW", [name, f"{pa:.3f}", f"{tl:g}", f"{pk/1000:.0f}K"]
