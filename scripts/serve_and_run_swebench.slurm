@@ -278,6 +278,16 @@ if [ ${#EB[@]} -gt 0 ] || [ -n "${ENABLE_THINKING:-}" ]; then
   fi
 fi
 
+# STEP_LIMIT overrides mini-swe-agent's 250-turn default. ACM sets
+# MAX_TURNS=999_999 (src/config.py) so episodes end on the context window or a
+# final answer, never on a turn cap. A fixed cap also biases against the memory
+# arms: memory exists to let the agent keep going, so the treatment is truncated
+# more often than the control (A1 lost 3-18 instances to it, the memory arms
+# 39-69). Written into the agent block of the override config.
+if [ -n "${STEP_LIMIT:-}" ]; then
+  printf 'agent:\n  step_limit: %s\n' "$STEP_LIMIT" >> "$API_OVERRIDE"
+fi
+
 echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS | Temperature: ${TEMPERATURE:-model default} | Max_tokens: ${MAX_TOKENS:-model default (uncapped)} | Output: $OUTPUT_DIR"
 (
   source agent-venv/bin/activate
