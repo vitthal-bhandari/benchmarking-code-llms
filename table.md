@@ -10,7 +10,7 @@
 | A3 ACM Base (untrained) | \textbf{0.263} | 199.6 | 183.4 | 54K | 23K | 28K | 0.7 | 37 | 2 |
 | **Qwen3.5-9B** | | | | | | | | | |
 | A1 ReAct (no memory) | 0.172 | 123.7 | 123.4 | 57K | 27K | 57K | 0 | 30 | 66 |
-| A2 Summarize-on-threshold | \textbf{0.374} | 176.6 | 175.7 | 54K | 26K | 35K | 1.12 | 46 | 0 |
+| A2 Summarize-on-threshold | \textbf{0.374} | 176.6 | 175.7 | 54K | 26K | 35K | 1.12 | 59 | 0 |
 | A3 ACM Base (untrained) | 0.303 | 182.9 | 182.4 | 54K | 25K | 37K | 1 | 48 | 5 |
 | **Reference: ACM paper, Qwen3.5-9B base** | | | | | | | | | |
 | \textit{ReAct (ACM paper)} | 0.489 | 74.7 | -- | 59K | -- | -- | -- | -- | -- |
