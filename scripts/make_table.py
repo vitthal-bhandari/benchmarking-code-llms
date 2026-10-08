@@ -55,6 +55,8 @@ def load(run_dir: str, eval_root: str | None) -> dict | None:
         "edits": edits, "edits_per": round(edits / n, 2),
         "vol": trig.count("voluntary"), "forced": trig.count("forced"), "harness": trig.count("harness"),
         "peak": int(st.median(g("peak_ctx_tokens"))),
+        "avgctx": int(st.mean(g("avg_ctx_tokens"))),
+        "finalctx": int(st.median(g("final_ctx_tokens"))),
         "util": round(st.mean([r.get("ctx_utilization") or 0 for r in rows]), 3),
         "growth": int(st.mean(g("growth_per_step"))),
         "obs_mean": int(st.mean(g("obs_tokens_mean"))), "obs_p90": int(st.median(g("obs_tokens_p90"))),
@@ -66,8 +68,8 @@ def load(run_dir: str, eval_root: str | None) -> dict | None:
 # ACM Table 2 reports Pass@1 / Tools / Peak Tok.; we mirror those three and add
 # the memory-specific columns their table has no column for.
 COLS = [("arm","Method",None),("resolved_rate","Pass@1","p"),("tool_calls","Tools","f"),
-        ("peak","Peak Tok.","K"),("edits_per","Edits","f"),("vol","Vol.","d"),
-        ("util","Util.","f"),("overhead","Ovh.","f"),("steps","Steps","f"),
+        ("steps","Steps","f"),("peak","Peak","K"),("avgctx","Avg","K"),
+        ("finalctx","Final","K"),("edits_per","Edits","f"),
         ("submitted","Sub.","d"),("ctx_death","OOC","d")]
 
 ARM_LABEL = {"none": "A1 ReAct (no memory)", "summarize": "A2 Summarize-on-threshold",
@@ -119,16 +121,31 @@ def main():
         r["_model"] = model_of(r["run"])
     rows.sort(key=lambda r: (r["_model"], ARM_ORDER.get(r["policy"], 9)))
 
+    # best Pass@1 within each model, so "which arm wins" is readable at a glance
+    best = {}
+    for r in rows:
+        v = r.get("resolved_rate")
+        if v is not None and v > best.get(r["_model"], (-1, None))[0]:
+            best[r["_model"]] = (v, r["run"])
+
     body, cur = [], None
     for r in rows:
         if r["_model"] != cur:
             cur = r["_model"]
             body.append(("GROUP", PRETTY.get(cur, cur)))
-        body.append(("ROW", [fmt(r.get(k), t) for k, _, t in COLS]))
+        cells = [fmt(r.get(k), t) for k, _, t in COLS]
+        if best.get(r["_model"], (None, None))[1] == r["run"]:
+            cells[1] = r"\textbf{%s}" % cells[1]
+        body.append(("ROW", cells))
     body.append(("GROUP", "Reference: ACM paper, Qwen3.5-9B base"))
+    ci = {k: i for i, (k, _, _) in enumerate(COLS)}
     for name, pa, tl, pk in ACM_REF:
-        body.append(("ROW", [name, f"{pa:.3f}", f"{tl:g}", f"{pk/1000:.0f}K"]
-                            + ["--"] * (len(COLS) - 4)))
+        cells = ["--"] * len(COLS)
+        cells[0] = name
+        cells[ci["resolved_rate"]] = f"{pa:.3f}"
+        cells[ci["tool_calls"]] = f"{tl:g}"
+        cells[ci["peak"]] = f"{pk/1000:.0f}K"
+        body.append(("ROW", cells))
 
     md = ["| " + " | ".join(c[1] for c in COLS) + " |",
           "|" + "|".join(["---"] * len(COLS)) + "|"]
@@ -157,19 +174,23 @@ def main():
         else:
             tex.append(" & ".join(v) + r" \\")
     tex += [r"\bottomrule", r"\end{tabular}",
-            r"\caption{Memory-management arms on SWE-Bench Verified. "
-            r"\textbf{Pass@1} is the resolved rate; \textbf{Tools} the mean tool calls per "
-            r"episode; \textbf{Peak Tok.} the mean peak context, following ACM's Table~2. "
-            r"\textbf{Edits} is mean memory compressions per instance, \textbf{Vol.} those the "
-            r"model issued unprompted, \textbf{Util.} peak context as a fraction of the budget, "
-            r"\textbf{Ovh.} memory-operation tokens as a fraction of agent tokens, "
-            r"\textbf{Sub.} submitted patches and \textbf{OOC} out-of-context failures. "
-            r"All arms share one model, sampling configuration and 64K budget; the only "
-            r"variable is the memory policy. ACM reference rows use a three-tool scaffold "
-            r"(\texttt{execute\_bash}, \texttt{str\_replace\_editor}, \texttt{submit\_patch}) "
-            r"whereas ours exposes a single bash tool, so Tools and Peak Tok. are not directly "
-            r"comparable across that boundary.}",
-            r"\label{tab:memory-arms}", r"\end{table*}"]
+            r"\caption{Memory-management arms on SWE-Bench Verified (99 instances, 64K "
+            r"budget). \textbf{Pass@1} is the resolved rate, bolded per model; "
+            r"\textbf{Tools} mean tool calls and \textbf{Steps} mean agent turns per "
+            r"episode (they differ when a turn emits several calls); \textbf{Peak}, "
+            r"\textbf{Avg} and \textbf{Final} are median peak, mean average and median "
+            r"final live-context size; \textbf{Edits} mean memory compressions per "
+            r"instance; \textbf{Sub.} submitted patches; \textbf{OOC} out-of-context "
+            r"failures. Within a model all arms share one sampling configuration and "
+            r"budget, so the only variable is the memory policy. No voluntary compression "
+            r"occurred in any run: every edit was harness-triggered (A2) or forced at the "
+            r"95\% threshold (A3). Peak is bounded by the compression trigger for A2/A3 "
+            r"and by the context wall for A1, so Avg and Final are the informative context "
+            r"columns. ACM reference rows use a three-tool scaffold "
+            r"(\texttt{execute\_bash}, \texttt{str\_replace\_editor}, "
+            r"\texttt{submit\_patch}) at a 128K window against our single bash tool at "
+            r"64K, so Tools and Peak are not comparable across that boundary.}",
+           r"\label{tab:memory-arms}", r"\end{table*}"]
     tex = "\n".join(tex)
 
     if a.changelog:
