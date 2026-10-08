@@ -184,11 +184,11 @@ def main():
             r"failures. Within a model all arms share one sampling configuration and "
             r"budget, so the only variable is the memory policy. No voluntary compression "
             r"occurred in any run: every edit was harness-triggered (A2) or forced at the "
-            r"95\\% threshold (A3). Peak is bounded by the compression trigger for A2/A3 "
+            r"95\% threshold (A3). Peak is bounded by the compression trigger for A2/A3 "
             r"and by the context wall for A1, so Avg and Final are the informative context "
             r"columns. ACM reference rows use a three-tool scaffold "
-            r"(\\texttt{execute\\_bash}, \\texttt{str\\_replace\\_editor}, "
-            r"\\texttt{submit\\_patch}) at a 128K window against our single bash tool at "
+            r"(\texttt{execute\_bash}, \texttt{str\_replace\_editor}, "
+            r"\texttt{submit\_patch}) at a 128K window against our single bash tool at "
             r"64K, so Tools and Peak are not comparable across that boundary.}",
            r"\label{tab:memory-arms}", r"\end{table*}"]
     tex = "\n".join(tex)
