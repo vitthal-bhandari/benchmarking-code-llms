@@ -348,3 +348,75 @@ missing plumbing. Verify against ACM source before writing this up as a result.
 - Resolve the ACM 95% faithfulness question; re-run A3 if a backstop is needed.
 - Re-derive `mem_subset` with the exact tokenizer (was chars/4); then cap sweep
   (16k/24k/32k) for the degradation-curve figure.
+
+---
+
+## B2 — 3 models x 3 arms, 99 instances, 64k budget (runs 3446xx)
+
+Qwen3.5-9B, MiMo-V2.6-Distill-Qwen-9B, Gemma-4-12B-it. Identical model, sampling
+and 64k budget within each model; the only variable is the memory policy. Token
+calibration 1.000 on every run; zero `CalledProcessError` (local-SIF fix).
+
+| Model | Arm | Sub. | OOC | Edits/inst | Voluntary | Peak | Steps | Ovh. |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| Qwen3.5-9B | none | 30 | **66** | 0 | — | 57K | 123 | 0 |
+| | summarize | 46 | **0** | 1.12 | 0 | 54K | 176 | 0.8% |
+| | acm | 48 | 5 | 1.00 | **0** | 54K | 182 | 0.7% |
+| MiMo-9B | none | 20 | **59** | 0 | — | 57K | 130 | 0 |
+| | summarize | 30 | **0** | 1.54 | 0 | 54K | 191 | 0.8% |
+| | acm | 37 | 2 | 0.70 | **0** | 54K | 183 | 0.6% |
+| Gemma-4-12B-it | none | 62 | 27 | 0 | — | 35K | 71 | 0 |
+| | summarize | 85 | **0** | 0.58 | 0 | 32K | 88 | 0.9% |
+| | acm | 82 | 3 | 0.48 | **0** | 39K | 94 | 0.8% |
+
+### Findings (behavioural — these are solid)
+1. **Zero voluntary compressions across all three models.** Every one of the 216
+   edits was harness-triggered (A2) or forced at the 95% threshold (A3), and
+   `query_memory` was invoked once in the entire run. This is ACM's Figure-4
+   claim reproduced at scale, and it now holds with the tools registered as real
+   function calls — an earlier build asked models to type `manage_context` into a
+   bash tool, which they ignored, and that artefact made forced compliance look
+   like 0/6 when it is really 4/4.
+2. **Memory management eliminates context death.** A1 pins at the ceiling (median
+   peak 57,431 against a 57,344 usable budget) and loses 27-66 instances per
+   model; A2 loses none and A3 loses 2-5. Submissions rise 60-85%.
+3. **The failure mode shifts rather than disappearing.** `LimitsExceeded` climbs
+   sharply in the memory arms (Qwen 3 -> 45, MiMo 18 -> 56): agents that would
+   have died of context now exhaust the step limit instead. Memory buys
+   exploration, not completion.
+4. **Memory is nearly free** — summariser and retrieval calls cost 0.6-0.9% of
+   agent tokens.
+5. **Gemma is a different regime**: 35K peak vs 57K, far fewer deaths, highest
+   submission rate; it solves in shorter trajectories and feels less pressure.
+
+### Pass@1 (clean scoring round)
+The first scoring round was void: the overlay directory was keyed by instance_id
+inside the SHARED sif dir, so two runs grading the same instance mounted the same
+writable overlay. 195 of 277 apply-failures (70%) were sandbox collisions, and
+cached verdicts from that round could not be trusted either, since a contaminated
+/testbed can yield a wrong verdict rather than a crash. After moving the overlay
+under the per-run work_dir and re-grading all 891 with OVERWRITE=1, every job
+reports "no sandbox failures detected" and apply rates rose from 25-80% to
+67-100%.
+
+| Model | A1 none | A2 summarize | A3 acm (Base) |
+|---|--:|--:|--:|
+| Qwen3.5-9B | 0.172 | **0.374** | 0.303 |
+| MiMo-V2.6-Distill-Qwen-9B | 0.121 | 0.212 | **0.263** |
+| Gemma-4-12B-it | 0.293 | 0.273 | **0.384** |
+| *ACM paper, Qwen3.5-9B @128k* | *0.489* | *--* | *0.508* |
+
+1. **Memory management improves resolve rate on every model.** Best memory arm vs
+   A1: Qwen +118%, MiMo +117%, Gemma +31%. A3 beats A1 on all three.
+2. **A3 beats A2 on two of three models** (MiMo, Gemma); A2 wins on Qwen. With both
+   arms now firing at the identical trigger, that difference is mechanism only.
+3. **The effect is far larger than ACM report.** Their ReAct->Base gap is
+   0.489->0.508, just +3.9%, because at a 128K window SWE-Bench rarely applies
+   context pressure at all (median peak ~23k). At our imposed 64k budget the cap
+   actually binds -- A1 pins at the ceiling and loses 27-66 instances -- and the
+   benefit grows to +31-118%. **The value of context management is a function of
+   how tight the budget is**, which their single operating point cannot show.
+4. Absolute numbers sit below theirs (0.172 vs 0.489 for ReAct) for three known
+   reasons: a bash-only scaffold against their three tools (execute_bash,
+   str_replace_editor, submit_patch), a 64k budget against 128k, and a
+   99-instance subset chosen for context stress, i.e. harder than average.

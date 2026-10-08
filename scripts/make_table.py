@@ -137,7 +137,12 @@ def main():
                   else "| " + " | ".join(v) + " |")
     md = "\n".join(md)
 
-    tex = [r"\begin{table*}[t]", r"\centering", r"\small",
+    tex = [r"% needs \usepackage[table]{xcolor} in the preamble",
+           r"% (if that clashes, the ACL template already loads xcolor:",
+           r"%  use \usepackage{colortbl} instead)",
+           r"\providecommand{\grouprow}{}",
+           r"\definecolor{grouprowbg}{HTML}{DCE9F7}",
+           r"\begin{table*}[t]", r"\centering", r"\small",
            r"\begin{tabular}{l" + "r" * (len(COLS) - 1) + "}", r"\toprule",
            r"\multicolumn{%d}{c}{\textbf{SWE-Bench Verified}} \\" % len(COLS),
            r"\cmidrule(lr){1-%d}" % len(COLS),
@@ -146,7 +151,8 @@ def main():
     for kind, v in body:
         if kind == "GROUP":
             if not first: tex.append(r"\midrule")
-            tex.append(r"\multicolumn{%d}{l}{\textit{%s}} \\" % (len(COLS), v))
+            tex.append(r"\rowcolor{grouprowbg} \multicolumn{%d}{l}{\textit{%s}} \\"
+                       % (len(COLS), v))
             first = False
         else:
             tex.append(" & ".join(v) + r" \\")

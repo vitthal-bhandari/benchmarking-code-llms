@@ -100,6 +100,11 @@ EXTRA_ARGS=()
 # KEEP_SIF=1 keeps images on disk for reuse by later runs. Costs ~99 images of
 # scratch; without it each run re-pulls and will hit the Hub rate limit.
 [ "${KEEP_SIF:-0}" = "1" ] && EXTRA_ARGS+=(--keep-sif)
+# OVERWRITE=1 re-grades instances that already have a report. Needed whenever a
+# previous round ran under a harness bug that could have produced wrong verdicts,
+# not just hard failures -- cached results are only trustworthy if the run that
+# produced them was sound.
+[ "${OVERWRITE:-0}" = "1" ] && EXTRA_ARGS+=(--overwrite)
 [ "${OVERWRITE:-0}" = "1" ] && EXTRA_ARGS+=(--overwrite)
 # PREFETCH=1: pull the images into the shared cache and exit (no scoring). Run
 # once before the parallel scoring jobs. EVAL_SLICE (start:end) is read directly
