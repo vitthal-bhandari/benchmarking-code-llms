@@ -1,169 +1,111 @@
-# Benchmarking Coding LLMs
+# Agent Memory Management on SWE-Bench
 
-Benchmarking open-source LLM agents on SWE-Bench Verified, self-hosted with vLLM
-and run on the UW **Tillicum** (RCC, on-demand H200) cluster via Slurm.
-Baselines form a ladder — **B0** zero-shot, **B1** agent without memory, **B2**
-agent + memory (the eventual contribution) — so that later memory gains are
-attributable to memory rather than to harness sophistication.
+Does giving a coding agent explicit control over its own context actually help?
+This repo runs that experiment end to end: open-weight models served with vLLM on
+UW's Tillicum H200 cluster, agents driven through SWE-Bench Verified, and patches
+scored in Apptainer sandboxes on Klone.
+
+Three memory policies are compared under an identical model, sampling
+configuration and context budget, so the only thing that varies is the policy.
+
+| arm | what it does |
+|---|---|
+| **A1** no memory | plain ReAct. Context grows until it hits the budget and the run dies |
+| **A2** summarize | the harness compresses history once a threshold is crossed |
+| **A3** ACM base | the agent gets `manage_context` and `query_memory` as real tools and decides for itself. This is the untrained baseline from [ACM](https://arxiv.org/abs/2607.23809) |
+
+## What we found
+
+The value of context management is not a fixed property of the method. It depends
+on how tight the budget is, and it changes sign.
+
+<p align="center"><img src="docs/cap_sweep.svg" width="700" alt="Resolve rate against context budget"></p>
+
+At a 32K budget the baseline resolves 2 of 99 instances while memory resolves 27
+to 36. At 128K the baseline overtakes both. ACM report a single operating point at
+128K, which is the end of the curve where the mechanism has least to do.
+
+Two supporting results. Our 128K baseline lands at 0.485 against the 0.489 ACM
+report for the same model, which is a useful check that the pipeline is sound.
+And across every run only 2 compressions out of more than a thousand were
+voluntary, so these models do not manage their own context unless pushed.
+
+### Three models at a 64K budget
+
+| | Pass@1 | Tools | Steps | Peak | Final | Edits | Sub. | OOC |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| **Gemma-4-12B-it** | | | | | | | | |
+| A1 no memory | 0.293 | 71.7 | 71.1 | 35K | 35K | 0 | 62 | 27 |
+| A2 summarize | 0.273 | 89.1 | 88.2 | 32K | 26K | 0.58 | 85 | 0 |
+| A3 ACM base | **0.384** | 94.6 | 93.8 | 39K | 29K | 0.48 | 82 | 3 |
+| **MiMo-V2.6-Distill-Qwen-9B** | | | | | | | | |
+| A1 no memory | 0.121 | 143.3 | 129.6 | 57K | 57K | 0 | 20 | 59 |
+| A2 summarize | 0.212 | 209.3 | 190.5 | 54K | 27K | 1.54 | 30 | 0 |
+| A3 ACM base | **0.263** | 199.6 | 183.4 | 54K | 28K | 0.70 | 37 | 2 |
+| **Qwen3.5-9B** | | | | | | | | |
+| A1 no memory | 0.172 | 123.7 | 123.4 | 57K | 57K | 0 | 30 | 66 |
+| A2 summarize | **0.374** | 176.6 | 175.7 | 54K | 35K | 1.12 | 59 | 0 |
+| A3 ACM base | 0.303 | 182.9 | 182.4 | 54K | 37K | 1.00 | 48 | 5 |
+
+99 instances per cell. `Peak` is bounded by the compression trigger for A2 and A3
+and by the context wall for A1, so `Final` is the column that shows what memory
+actually does. Memory removes out-of-context failures almost entirely and roughly
+doubles the number of submitted patches.
+
+## Running it
+
+Serving and the agent loop run on Tillicum. Scoring runs on Klone, where
+SWE-Bench images are prebuilt once as Apptainer SIFs so a scoring round never
+touches Docker Hub.
+
+```bash
+# one model, all three arms
+bash scripts/launch_arms.sh configs/models/qwen35-9b.env
+
+# a single instance first, which is always worth doing
+INSTANCE_IDS=astropy__astropy-13236 bash scripts/launch_arms.sh configs/models/qwen35-9b.env acm
+
+bash scripts/track_runs.sh          # live progress across jobs
+```
+
+Scoring, then the paper table and figure:
+
+```bash
+sbatch --export=ALL,PREDS=runs/<run>/preds.json,RUN_ID=<run>,KEEP_SIF=1 \
+  scripts/run_apptainer_eval.slurm
+
+python3 scripts/make_table.py --run-dir "runs/<glob>" --eval logs/apptainer_eval \
+  --tex paper/table.tex --md paper/table.md
+```
 
 ## Layout
 
 ```
-scripts/         Slurm + setup scripts (see below)
-configs/         registry.json (litellm cost map) + api_override templates
-results/         sb-cli-reports/ — scored eval summaries (resolve rates)
-local-eval-reports/  Trustworthy scores from the local Docker harness (see below)
-updates/         Advisor / standup write-ups
-plan.md          Adaptive plan + running decision log
-report.md        Findings log
-requirements-working.txt   pip freeze of the known-good vLLM 0.21.0 serving env
-requirements-eval.txt      pip freeze of the local Docker-eval venv (eval-venv)
+scripts/memory_agent.py      the three policies, token accounting, ACM tool handlers
+scripts/run_memory_swebench.py  driver, a trimmed mini-swe-agent swebench runner
+scripts/serve_and_run_swebench.slurm   serve vLLM and drive the agent in one job
+scripts/run_apptainer_eval.*    sandboxed scoring on Klone
+scripts/make_table.py        paper tables, ACM's layout with their rows for reference
+scripts/render_trajectory_html.py   one run as a readable page with a context chart
 
-runs/            (gitignored) agent trajectories, preds.json, per-run outputs
-logs/            (tracked) Slurm job stdout/stderr — kept in git; Tillicum
-                 scratch isn't a reliable single copy
-eval-venv/       (gitignored) local Python venv for the SWE-bench Docker harness
-local_eval/      (gitignored) harness working dir — build/run logs, per-instance
-                 test output; regenerate anytime from runs/*/preds.json
+configs/models/*.env         one file per model and budget, the only thing that
+                             differs between arms is MEMORY_POLICY
+configs/mem_subset_99.txt    the evaluation subset
+
+paper/                       results section, tables, figure
+report.md                    findings log, including the ones that did not work
+plan.md                      running decision log
+logs/                        Slurm output, kept in git since cluster scratch is purged
 ```
 
-Scored summaries (`results/`, `local-eval-reports/`) are tracked; raw
-trajectories/preds under `runs/` are heavy and reproducible, so they stay
-local.
+## Notes
 
-## Cluster: Tillicum
+Token counting uses the served model's own tokenizer through vLLM's `/tokenize`
+endpoint, so thresholds are exact rather than estimated. Every scoring run ends
+with a sandbox check, because an overlay collision once corrupted 70% of patch
+applications and was only caught by reading logs by hand.
 
-- Slurm uses **QoS, not partitions** (`--qos=normal`), account `-A stf`, GPUs via
-  `--gres=gpu:h200:1`. **No preemption** (no checkpoint queue).
-- **Every job must request >=1 GPU — CPU-only jobs are rejected outright.**
-  Fixed ratio: max **8 CPUs / 200GB RAM per GPU requested**; sbatch hard-fails
-  over that, it's not a soft limit.
-- Storage: code + venvs in `/gpfs/projects/stf/$USER/benchmarking-code-llms`
-  (backed up); HF/torch/vLLM caches in `/gpfs/scrubbed/$USER/.cache/*` (large,
-  purged after 60 days idle — fine for regenerable weights, don't put anything
-  else there); `$HOME` is only 10GB, avoid it entirely.
-- Toolchain via modules: `module load gcc/11.5.0`.
-
-## Setup (one-time, in a GPU allocation)
-
-```bash
-salloc -A stf --qos=normal --gres=gpu:h200:1 -c 8 --mem=64G -t 02:00:00
-cd /gpfs/projects/stf/$USER/benchmarking-code-llms
-bash scripts/install_venv.sh          # builds .venv (serving) + agent-venv (driver)
-```
-
-`.venv` is hand-assembled (vLLM 0.21.0 + transformers-from-git + a self-contained
-pip CUDA toolkit). **Do not `uv sync` it** — that reverts vLLM to a version that
-breaks Qwen3.6 (see the header in `install_venv.sh`). `requirements-working.txt`
-is the exact known-good snapshot.
-
-Default models are **full-weights (BF16)**, not FP8 — H200's 141GB has no need
-for the memory-driven quantization Klone's 48GB L40S required, and full weights
-avoid DeepGEMM (a from-source CUDA build, the single biggest setup risk on
-Klone) entirely. Download weights from the **login node** (no GPU billing) to
-`/gpfs/scrubbed`, not home:
-
-```bash
-source .venv/bin/activate
-export HF_HOME=/gpfs/scrubbed/$USER/.cache/huggingface
-hf download Qwen/Qwen3.6-35B-A3B
-hf download google/gemma-4-26B-A4B-it
-```
-
-## Pipeline (SWE-Bench Verified, B1 agent)
-
-**One job** serves the model and drives the agent together (Tillicum disallows
-a separate CPU-only driver job, and a second GPU-billed job just to make HTTP
-calls would double cost for nothing):
-
-```bash
-sbatch --export=SLICE="0:20",WORKERS=4,OUTPUT_DIR=runs/run_qwen_20 \
-  scripts/serve_and_run_swebench.slurm
-# actual dir gets the job id appended: runs/run_qwen_20_<jobid>/ (so repeated
-# runs stay distinct). The job log prints the resolved path; or: ls -dt runs/*
-
-# Score once it finishes (needs SWEBENCH_API_KEY; sb-cli is in agent-venv).
-source agent-venv/bin/activate
-RUN=run_qwen_20_<jobid>
-sb-cli submit swe-bench_verified test \
-  --predictions_path runs/$RUN/preds.json --run_id $RUN
-```
-
-Run a second model (e.g. Gemma4) as its own job — it gets its own GPU and runs
-in parallel:
-
-```bash
-sbatch --export=MODEL_NAME="google/gemma-4-26B-A4B-it",TOOL_CALL_PARSER=gemma4,\
-  MAX_NUM_BATCHED_TOKENS=4096,AGENT_MODEL_NAME="hosted_vllm/google/gemma-4-26B-A4B-it",\
-  SLICE="0:20",WORKERS=4,OUTPUT_DIR=runs/run_gemma4_20 \
-  scripts/serve_and_run_swebench.slurm
-```
-
-`serve_vllm.slurm` also still exists standalone, for interactive debugging (a
-long-lived server you `curl`/iterate against) — that use case is worth its own
-GPU; full scored runs should go through `serve_and_run_swebench.slurm`.
-
-## Scoring (official swebench grading, NOT sb-cli)
-
-**Do not trust `sb-cli`'s hosted evaluator** — as of Aug 2026 it returns
-`completed_instances: 0` / `failed_instances: 100%` on every submission
-regardless of prediction quality (a known, unresolved outage —
-[swe-bench/sb-cli#27](https://github.com/swe-bench/sb-cli/issues/27), #28, #31;
-a maintainer confirmed they've stopped accepting submissions). Every
-`sb-cli-reports/*.json` result is uninformative, **not** a real 0%. Score with
-the official `swebench` grading code instead. Generation is unchanged (Tillicum
-GPUs); only scoring moves. There are two backends:
-
-**A) Klone + Apptainer (primary — no Docker, no GPU, real disk).** Klone allows
-CPU-only jobs and has Apptainer + `/gscratch/scrubbed`, so this is where full
-runs get scored. Each instance pulls its pre-built DockerHub eval image into a
-single `.sif`, applies the patch + runs the tests inside it (`--fakeroot` +
-per-instance writable overlay), grades with swebench's own `get_eval_report`,
-then **deletes the `.sif`** — peak disk stays ~one image, sidestepping the
-storage wall that Docker hits. Klone nodes are x86_64, so the images run
-natively (no emulation).
-
-```bash
-bash scripts/install_klone_eval_venv.sh    # one-time, on a Klone LOGIN node
-sbatch --export=PREDS=runs/<run>/preds.json,RUN_ID=<run_id> \
-  scripts/run_apptainer_eval.slurm          # CPU-only job (default: ckpt-all)
-# -> local-eval-reports/<run_id>.json (tracked, summary). Resumable: rerun to
-#    continue after a checkpoint-partition preemption (per-instance reports
-#    are cached under logs/apptainer_eval/<run_id>/<instance_id>/).
-```
-
-Per-instance diagnostics (`report.json`, `apply.log`, `exec.log`, `test_output.log`)
-land in `logs/apptainer_eval/<run_id>/<instance_id>/` — **tracked in git**, not
-left on Klone scratch, since `/gscratch/scrubbed` is unbacked-up and purged
-after 60 days idle (same reasoning as the rest of `logs/`). Only the large,
-trivially-regenerable pieces (`.sif` images, overlays, staged patch/eval
-files) live on scratch, deleted after each instance.
-
-**B) Mac + Docker/Colima (fallback — only if you have real free disk).** Same
-official harness (`swebench eval`) against Docker on a laptop. Correct, but the
-full astropy+django image set (~100GB+ resident) overran a disk-capped Colima
-VM; use only for small single-repo subsets.
-
-```bash
-bash scripts/install_eval_venv.sh          # one-time: Colima + docker + eval-venv
-scripts/run_local_eval.sh runs/<run>/preds.json <run_id> [workers]
-```
-
-(The Mac path pre-pulls each image with `--platform linux/amd64` since Docker
-Hub has no arm64 manifest for these — not needed on Klone's x86_64 nodes.)
-
-## Scripts
-
-| Script | Purpose |
-|---|---|
-| `install_venv.sh` | Build both Tillicum venvs (`BUILD_DEEPGEMM=1` only if serving an FP8 checkpoint) |
-| `serve_and_run_swebench.slurm` | **Primary generation path**: one GPU job, serves + drives against localhost |
-| `serve_vllm.slurm` | Standalone server, for interactive debugging only (see above) |
-| `run_swebench_agent.slurm` | Standalone driver — not directly submittable on Tillicum (0-GPU); kept for reference |
-| `install_klone_eval_venv.sh` | **Primary scoring setup**: one-time Klone venv (`swebench`) + dataset cache |
-| `run_apptainer_eval.slurm` / `run_apptainer_eval.py` | **Primary scoring**: score a run via Apptainer on Klone (CPU-only) |
-| `install_eval_venv.sh` | Fallback scoring setup: Colima + Docker + `eval-venv` on a Mac |
-| `run_local_eval.sh` | Fallback scoring: official Docker harness on a Mac (small subsets only) |
-
-Cluster-specific details (QoS, GPU ratio, CUDA/JIT toolchain) are documented
-inline in each script and in `plan.md`.
+`report.md` keeps the failures as well as the results. Several early numbers were
+wrong for reasons worth remembering, including a build that asked models to issue
+`manage_context` as a bash string rather than a registered tool, which they
+ignored entirely and which made forced compliance look like zero.
