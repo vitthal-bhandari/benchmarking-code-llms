@@ -464,3 +464,30 @@ Pass@1 pending Klone scoring; submissions and trajectory metrics below.
    This is a function of trajectory length rather than compression (arms differ
    by <=7pp within a cap). It explains why 128k does not help: the extra budget
    is spent re-issuing commands, not on new work.
+
+### Cap sweep: Pass@1 (clean scoring, 27/27 infra checks passed)
+
+| budget | A1 none | A2 summarize | A3 acm | best memory arm vs A1 |
+|---|--:|--:|--:|--:|
+| 32k  | **0.020** | 0.364 | 0.273 | **+0.343 (18x)** |
+| 64k  | 0.192 | 0.364 | **0.384** | +0.192 (+100%) |
+| 128k | **0.485** | 0.394 | 0.434 | **-0.051 (-10%)** |
+
+*ACM paper, Qwen3.5-9B at 128k: ReAct 0.489, ACM Base 0.508.*
+
+1. **The benefit of context management is monotone in budget tightness and
+   changes sign.** It is worth 18x at 32k, 2x at 64k, and is actively harmful at
+   128k. A single operating point cannot show this, and ACM report only the
+   128k end, where their own measured gap is +0.019.
+2. **Pipeline validation.** Our 128k baseline is 0.485 against their reported
+   ReAct 0.489 on the same model and benchmark. Reproducing their baseline to
+   within 0.004 with an independent harness is the strongest evidence we have
+   that the rest of these numbers are trustworthy.
+3. **At 128k we measure a small harm (-0.051) where they measure a small benefit
+   (+0.019).** Both effects are small and ours is on 99 instances, so this may be
+   noise or the single-bash-tool scaffold. It should not be reported as a
+   contradiction without more trials.
+4. **Memory arms submit more but convert less.** Resolved-given-submitted: 61%
+   vs 100% at 32k (n=2), 47-54% vs 58% at 64k, 45-53% vs 56% at 128k. They
+   rescue harder instances, so per-submission quality falls while total resolved
+   rises. This is the same selection effect seen in the 64k 3-model run.
