@@ -420,3 +420,47 @@ reports "no sandbox failures detected" and apply rates rose from 25-80% to
    reasons: a bash-only scaffold against their three tools (execute_bash,
    str_replace_editor, submit_patch), a 64k budget against 128k, and a
    99-instance subset chosen for context stress, i.e. harder than average.
+
+---
+
+## B2 — Cap sweep, Qwen3.5-9B, 32k / 64k / 128k (runs 3504xx)
+
+Same 99 instances, `step_limit=500`, three memory policies at each budget.
+Pass@1 pending Klone scoring; submissions and trajectory metrics below.
+
+| cap | arm | Sub | OOC | Lim | edits | nudges | vol | steps | Mtok/inst | Mtok/submit |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 32k | none | 2 | **97** | 0 | 0 | — | — | 55 | 0.75 | **37.33** |
+| | summarize | 59 | 1 | 39 | 815 | — | 0 | 311 | 4.32 | **7.25** |
+| | acm | 44 | **26** | 29 | 817 | 906 | 0 | 290 | 4.07 | 9.15 |
+| 64k | none | 33 | 65 | 1 | 0 | — | — | 120 | 3.38 | 10.13 |
+| | summarize | 76 | 0 | 19 | 202 | — | 0 | 252 | 7.06 | 9.20 |
+| | acm | 70 | 3 | 26 | 170 | 185 | 0 | 264 | 7.45 | 10.54 |
+| 128k | none | 86 | 9 | 2 | 0 | — | — | 166 | 6.95 | **7.99** |
+| | summarize | 86 | 0 | 12 | 17 | — | 0 | 199 | 8.96 | 10.32 |
+| | acm | 81 | 1 | 15 | 29 | 28 | **2** | 231 | 10.60 | 12.96 |
+
+### Findings
+1. **The benefit of context management is a function of budget tightness, and it
+   crosses zero.** At 32k the baseline collapses (2 submissions, 97 out-of-context)
+   while memory recovers 44-59. At 64k the gap is 33 vs 70-76. At 128k all three
+   converge and memory is slightly negative (86 / 86 / 81).
+2. **Token cost crosses over too, in the same direction.** Cost per submission:
+   at 32k memory is 4-5x cheaper (7.25M vs 37.33M), at 64k break-even, at 128k
+   1.3-1.6x more expensive (12.96M vs 7.99M). Memory-operation tokens themselves
+   are negligible (0.1-2.6%); the cost is that memory keeps agents running.
+3. **Models comply with a forced nudge ~90% of the time** (906 nudges -> 817 edits
+   at 32k; 185 -> 170 at 64k) now that the tools are registered as real function
+   calls. The earlier bash-string build measured 0%.
+4. **Voluntary compression exists but is vanishingly rare**: 2 of 99 instances,
+   at 128k only, both firing at 82-99k context with zero nudges, i.e. genuinely
+   unprompted. Zero voluntary compressions across all 987 edits at 32k and 64k.
+5. **Nudge-based forcing is unreliable under hard pressure.** At 32k A3 still
+   loses 26 instances to out-of-context while A2 loses 1, despite comparable edit
+   counts (817 vs 815). A2 compresses unconditionally; A3 asks and sometimes the
+   answer is no, or too late. 17 STOP_PROMPT escalations fired at 32k.
+6. **Long trajectories are dominated by repeated commands, and the rate rises
+   with budget**: exact-repeat share is 23% (32k) -> 39% (64k) -> 48-55% (128k).
+   This is a function of trajectory length rather than compression (arms differ
+   by <=7pp within a cap). It explains why 128k does not help: the extra budget
+   is spent re-issuing commands, not on new work.
