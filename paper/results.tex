@@ -1,50 +1,57 @@
 \section{Results}
 
-We evaluate three models under three memory policies on 99 SWE-Bench Verified
-instances with a 64K context budget. Within a model every arm shares the same
-sampling configuration and budget, so the only variable is the memory policy.
-A1 is plain ReAct with no memory. A2 compresses on a harness threshold. A3 is
-ACM's untrained Base agent, which is given the context management tools and
-chooses when to use them.
+We evaluate three memory policies on 99 SWE-Bench Verified instances. A1 is plain
+ReAct with no memory. A2 compresses on a harness threshold. A3 is ACM's untrained
+Base agent, which is given the context management tools and decides when to use
+them. Table~\ref{tab:memory-arms} compares three models at a 64K budget.
+Table~\ref{tab:cap-sweep} and Figure~\ref{fig:cap-sweep} sweep Qwen3.5-9B across
+32K, 64K and 128K. Within any row group the model, sampling configuration and
+budget are fixed, so the only variable is the memory policy.
 
-\paragraph{Memory improves coverage rather than accuracy.}
-Pass@1 rises for every model (Table~\ref{tab:memory-arms}). The gain comes
-almost entirely from instances the baseline lost. Splitting each model's
-instances by whether A1 ran out of context, A1 resolves none of the instances it
-lost, while A2 and A3 resolve 11\% to 27\% of the same instances. On the
-instances A1 already handled the arms are within six points of each other.
-Memory therefore turns impossible instances into merely hard ones, and it does
-not damage runs that never needed it.
+\paragraph{The value of context management depends on the budget, and changes sign.}
+At 32K the baseline resolves 2 of 99 while memory resolves 27 to 36. At 64K the
+gap is 19 against 36 to 38. At 128K the baseline overtakes both, 48 against 39 to
+43. The benefit is therefore not a property of the method but of the regime it
+runs in. ACM report a single operating point at 128K, where their own measured
+gap is $+0.019$, which is the end of the curve where the mechanism has least to do.
 
-\paragraph{Compression predicts failure without causing it.}
-Instances that compressed resolve at 3\% to 28\%. Instances that did not
-compress resolve at 37\% to 63\%. This is selection rather than harm. An
-instance reaches the compression trigger because it is long, and long instances
-are harder. The correct counterfactual is the baseline, which scores zero on
-exactly those instances.
+\paragraph{Our baseline reproduces theirs.}
+At 128K we measure ReAct at 0.485 against their reported 0.489 on the same model
+and benchmark, with an independent harness. At 128K we see a small harm from
+memory where they report a small benefit. Both effects are small and ours rests
+on 99 instances, so we do not read this as a contradiction.
+
+\paragraph{Memory improves coverage rather than per-patch quality.}
+Almost all of the gain comes from instances the baseline loses outright. At 64K,
+splitting by whether A1 survived, A1 resolves 19 of the 34 instances it completes
+and none of the 65 it loses to context. On those same 65, A2 resolves 19 and A3
+resolves 21. On the 34 the baseline already handled, all three arms sit within six
+points of each other. A3 converts its hard-instance submissions at 57\%, which
+matches the baseline's 58\% on easy instances, so the patches are not worse. The
+lower aggregate conversion of the memory arms is a pooling effect from attempting
+harder problems.
 
 \paragraph{No model manages its own context.}
-All 216 compressions were either triggered by the harness or forced at the 95\%
-threshold. None were voluntary, and \texttt{query\_memory} was invoked once
-across all nine runs. This holds with both tools registered as real
-function-calling tools, so it is not an artifact of how they are exposed. An
-earlier configuration that asked models to issue \texttt{manage\_context} as a
-bash string was ignored entirely, which understated forced compliance.
+Across every run, 2 compressions out of more than 1000 were voluntary, both on
+Qwen3.5-9B at 128K and both firing well below the forced threshold. Every other
+compression was triggered by the harness or forced at 95\%. Models do comply when
+told: 906 nudges produced 817 compressions at 32K. An earlier configuration that
+asked for \texttt{manage\_context} as a bash string rather than a registered tool
+was ignored entirely, and would have reported that compliance as zero.
 
-\paragraph{The bottleneck moves from context to turns.}
-Memory removes out-of-context failures and replaces them with turn-limit
-failures. For Qwen3.5-9B, out-of-context failures fall from 66 to 5 while
-turn-limit failures rise from 3 to 45. MiMo loses 69 of 99 instances to the
-250-turn limit under A2. ACM imposes no turn cap, so this limit is ours, and it
-truncates the memory arms more often than the baseline because memory exists to
-extend the run.
+\paragraph{Forcing by prompt is unreliable under pressure.}
+At 32K, A3 still loses 26 instances to out-of-context while A2 loses 1, on
+comparable edit counts of 817 and 815. A2 compresses unconditionally, whereas A3
+asks and roughly a tenth of the time the answer is late or absent. This is the
+clearest argument in our data for post-training the behaviour rather than
+prompting for it.
 
-\paragraph{Comparison with ACM.}
-Our absolute numbers are lower than theirs, 0.172 against 0.489 for ReAct on the
-same base model. We expose a single bash tool against their three-tool scaffold,
-impose a 64K budget against their 128K and evaluate on a subset selected for
-context pressure. The effect size moves the other way. Their ReAct to Base gap
-is 3.9\%, while ours ranges from 31\% to 118\%. At 128K, SWE-Bench rarely fills
-the window, so the mechanism has little to do. How much context management is
-worth appears to depend on how tight the budget is, which a single operating
-point cannot show.
+\paragraph{Two limits of the current setup.}
+First, a turn limit of 500 still truncates the memory arms, and no run that hits
+it ever resolves. At 32K, 68 instances across A2 and A3 end this way, so the
+benefit we measure at tight budgets is a lower bound. Inspecting those
+trajectories, 67\% of their final 50 commands are new at 32K against 25\% at
+128K, so the tight-budget runs are cut off while still working whereas the 128K
+runs are looping. Second, agents do not convert a larger budget into new work:
+the share of commands that exactly repeat an earlier command rises from 23\% at
+32K to 55\% at 128K. That is why 128K does not help.
