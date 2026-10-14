@@ -11,7 +11,7 @@
 # =============================================================================
 # run_swebench_agent.slurm — drives mini-swe-agent against an already-running
 # vllm_serve job. Makes HTTP calls to the vLLM server and builds/runs Apptainer
-# sandboxes; it does not use a GPU itself.
+# sandboxes; it does not use a GPU itself. 
 #
 # NOT SUBMITTABLE AS-IS ON TILLICUM: "CPU-only jobs are not allowed" — every
 # job needs --gres=gpu:h200:1+. For full scored runs, use
