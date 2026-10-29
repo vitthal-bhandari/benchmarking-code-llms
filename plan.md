@@ -683,3 +683,131 @@ model (the mechanism question isn't model-specific).
 3. Add the ACM policy (port `history.py` + manage_context/query_memory + token hint).
 4. Run A1–A3 on the cap-sensitive subset at 32k; measure resolve + efficiency.
 5. A4 (training/transfer) only if the mechanism shows promise.
+
+---
+
+## Compute move — dumpling (Oct 29 2026)
+
+Source: larchlab/onboarding `technical.md#compute`. `dumpling.ischool.uw.edu`:
+64 CPUs, 2× A40 (48 GB each, Ampere sm_86), SSDs at `/mnt/disk1` and `/mnt/disk2`
+(4 TB each). Shared lab box ("keep things tidy"). Internal DNS only, so Husky
+OnNet is needed off campus. No scheduler is documented, so assume none: jobs run
+under tmux and die with nothing to restart them.
+
+**Access status (Oct 29):** DNS resolves over the VPN and the host key was
+accepted, but `vitthal1` is refused with both the ed25519 and RSA keys. Ask Lucy to
+confirm the key `SHA256:x3b1poS5XENxlo04zJR9VaG1cIua9P049G9+LXZIWB8` and the
+username. `~/.ssh/config` still has no `Host dumpling` block.
+
+### Memory fits; speed is the constraint
+Every model we use is hybrid attention, so KV cache is small:
+| Model | Full-attention layers | KV per token (bf16) | One 128K sequence |
+|---|---|---|---|
+| Qwen3.5 9B / 4B (and MiMo, same arch) | 8 of 32 | 32 KB | 4.3 GB |
+| Qwen3.5 2B / 0.8B | 6 of 24 | 12 KB | 1.6 GB |
+| Gemma 4 12B (8 global layers, 1 KV head, dim 512) | 8 of 48 | 16 KB + ~0.3 GB fixed sliding | 2.1 GB |
+A 9B model in bf16 is ~19 GB, leaving ~20 GB of KV on one A40. That covers
+8 workers at 128K because average contexts sit well below the cap. One run per GPU,
+two runs at once, no tensor parallelism needed. (The fork session guessed that
+128K would not fit; it assumed full attention in every layer.)
+
+Speed: the A40 has ~1/7 of the H200's memory bandwidth. On Tillicum a step took
+~6 to 9 s per worker (qwen35-9b_none: 8.4 s, ~200 completion tokens), and most of
+that was container and prefill time, not decoding. Estimated A40 slowdown is
+**~1.5 to 3× per run**. Measure it before trusting it (see the calibration step below).
+
+Budget arithmetic: the 27-run 1000-step sweep is ~240 H200 GPU-hours once the
+incomplete runs finish. At ~2× that is ~480 A40 GPU-hours, or about 10 days of
+**both** GPUs. That is too much for a shared box without Lucy's OK. The onboarding
+doc itself says bigger jobs belong on cloud, using the lab credits.
+
+### What goes where
+- **dumpling:** smokes, scaffold debugging, the Qwen3.5 size-sweep pilot (0.8B
+  and 2B can share one A40), Olmo-3-7B smoke, **and scoring** if Docker is
+  installed (64 CPUs; native swebench harness; removes the Klone dependency).
+- **Tillicum (if allocation returns) or lab cloud credits:** 9B-scale full sweeps
+  and the incomplete-run resumptions (mimo 128k, mimo/qwen summarize).
+- Ask Lucy: acceptable GPU-days per week, whether to claim one GPU or both,
+  which disk to use, and whether Docker access is allowed.
+
+### Port checklist (do once we can log in)
+1. Inventory: `nvidia-smi`, driver/CUDA version, `docker`/`apptainer`/`podman`,
+   `docker info` (data root and free space), `uv`, `tmux`.
+2. Project at `/mnt/diskN/vitthal1/benchmarking-code-llms`; HF, uv, pip and
+   container caches on the same disk, never in `$HOME`.
+3. Runner: the slurm script is plain bash (`#SBATCH` lines are comments), so run it
+   directly. Make the Tillicum paths (`/gpfs/scrubbed`, `module load`) env-driven,
+   add `CUDA_VISIBLE_DEVICES` and a per-GPU port, and wrap each run in a named tmux
+   session. `track_runs.sh` needs a non-sacct mode.
+4. Container class: `docker` if available. Local images avoid the Docker Hub
+   manifest problem because `docker run` uses the cached image. Otherwise use
+   apptainer with the prebuilt SIF dir.
+5. vLLM: rebuild the same versions as Tillicum (`.venv` 0.21 / `.venv-new` 0.28) for
+   sm_86. Risks: there is no FA3 on Ampere, and Gemma 4's 512-dim global heads need
+   a backend that supports them. Smoke Gemma first.
+6. **Calibration before any new results:** rerun one existing cell on dumpling
+   (qwen35-9b_none at 64K on a 20-instance slice). Compare resolve rate and step
+   counts with 353102 and measure wall time. This gives the real slowdown factor
+   and checks that mixing hardware does not shift results.
+
+### Comparability rule
+Same vLLM version, sampling and caps across machines. Never split one table's
+arms across machines; a model's three arms always run on the same hardware.
+
+---
+
+## Next phase — small-model ideation (DRAFT, Oct 29 2026, still iterating)
+
+_Brainstorm, not a commitment. Expect this section to change over the next few days._
+
+**Scope for now:** Qwen3.5 0.8B, 2B, 4B (Qwen3.6 has no sizes below 27B; Qwen3.5
+has instruct and `-Base` versions of each). Caps 32K and 64K only. 9B runs and
+128K are on hold. All work on dumpling.
+
+**Main constraint:** SWE-bench resolve rate will likely be near zero at these
+sizes. Anchor: Qwen3.5-9B at 64K scored 0.19 / 0.36 / 0.38 (A1 / A2 / A3). Every
+idea needs a metric that isn't floored, or a training step.
+
+### Candidate ideas (ranked)
+1. **Who should manage context at small scale?** A1/A2/A3 × {0.8B, 2B, 4B} ×
+   {32K, 64K} = 18 runs, inference only. Hypothesis: below some size A3 falls under
+   A2 (nudges ignored, malformed tool calls, lossy summaries) while A2 still helps.
+   The crossover size is the finding. Measures besides pass@1: patch touches a
+   gold file, patch apply rate, submissions, context deaths, nudge compliance,
+   malformed tool calls.
+2. **Compression fidelity as an offline benchmark.** We have 3,339 compression
+   events with full history (`raw_messages.json`) from the sweep. Mine the facts
+   needed after each event (reopened files, error strings, edited lines), turn
+   them into probe questions and score each summary by probe recall. Cheap and not
+   floored. It tests whether summary quality predicts success, and it supplies the
+   reward for idea 3.
+3. **Self-distillation from hindsight.** OPSD/SDPO-style self-teacher whose
+   privileged information is the future: the teacher copy sees which past spans
+   were used later and scores compress and keep decisions. No 397B teacher and no
+   sparse reward. Leakage risk: show the teacher *which* spans mattered, never
+   future content. Setup: one A40 for rollouts, one for training; full fine-tuning
+   for 0.8B and 2B, LoRA for 4B.
+4. **Counterfactual replay.** Fork saved trajectories at compression points and
+   swap the memory state (own summary, summary by 9B or 27B, no compression), then
+   continue with the same small model. This gives the causal effect of memory
+   quality versus policy strength and fixes the selection effects we kept hitting.
+   Cost: restoring container state by replaying earlier bash commands.
+5. **Memory across tasks as a substitute for size** (parked). AdaMEM-style
+   lessons per repo, ordered by date to avoid leakage. Does a 2B with memory match
+   a 4B without it? It widens scope beyond context management.
+
+Working storyline: ideas 1 + 2 + 3 make one paper (small models can't manage their
+own context, the harness can, and hindsight self-distillation teaches them to),
+with idea 4 as the causal analysis.
+
+### Immediate steps
+1. Port the runner to dumpling (see "Compute move — dumpling" above).
+2. **Floor check:** 20 instances × {0.8B, 2B, 4B}, A2 at 64K. Decide which sizes
+   give usable signal before committing to the 18-run grid.
+
+### Open questions (to resolve while iterating)
+- Use a smaller, easier instance set if 0.8B and 2B are fully floored?
+- Instruct vs `-Base` as the starting point for training in idea 3.
+- Distillation from a larger teacher as a comparison point for idea 3. This needs a
+  shared tokenizer (check Qwen3.5 vs Qwen3.6) and Qwen3.6-35B-A3B-FP8 is tight on
+  one A40.
