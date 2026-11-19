@@ -618,3 +618,12 @@ Caveats: ACM released only BrowseComp-Plus code, so which mode produced their
 SWE-bench Base number is unknown. All existing A1 numbers at 32k/64k should be read
 as "A1 without a graceful stop"; how many of those deaths would score with a
 STOP-and-submit is unknown until we rerun.
+
+**Correction (paper, Fig. 4):** the near-zero memory-tool use there is GPT-5.5.
+Untrained Qwen3.5-9B under ACM's harness calls `manage_context` 2.1× and
+`query_memory` 0.6× per BrowseComp-Plus question, with no nudge (the nudge is scaling-mode
+only). Our "0 voluntary" is therefore *not* a reproduction of ACM. It is a gap to
+explain. Likely contributors, all addressed in harness v2: we never told the model its
+context window; one-line guidance instead of ACM's strategy block; markers stamped on
+every observation; tool replies that make the model restart. Also untested: task domain
+and the bash-only scaffold. Full audit: `docs/acm_vs_ours.md`.
