@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import time
 from collections import Counter
 from pathlib import Path
@@ -216,7 +217,187 @@ MEM_TOOLS = [MANAGE_CONTEXT_TOOL, QUERY_MEMORY_TOOL]
 MEM_TOOL_NAMES = {"manage_context", "query_memory"}
 
 
-def _install_memory_tools(model):
+# ══════════════════════════════════════════════════════════════════════════
+# Harness v2 (Nov 18 2026): faithful to the ACM repo @ f06f90e and the paper's
+# App. B. See docs/acm_vs_ours.md for every difference and why. v1 objects
+# above are kept unchanged so the scored v1 runs stay reproducible.
+# ══════════════════════════════════════════════════════════════════════════
+
+# _CONTEXT_WINDOW_LINE (prompts.py), given to EVERY arm, ReAct baseline included.
+CONTEXT_WINDOW_LINE_V2 = (
+    "Your context window is {context_window} tokens. Plan your work accordingly — once context "
+    "is full the conversation ends immediately. You must submit your fix before reaching the "
+    "context limit."
+)
+
+# _HEADER_WITH_MEMORY (prompts.py), task wording changed from search to code.
+ACM_HEADER_V2 = """\
+You need to solve the task by interacting with the repository through the shell and managing your context memory. Your in-context information serves as short-term memory; previously compressed segments live in long-term memory.
+
+After each tool result, the system appends "[CURRENT CONTEXT TOKEN: N]" at the end of the tool response — this tells you your current context usage. Read it; do NOT emit it yourself.
+
+The "manage_context" tool takes no arguments. When you call it, the system compresses everything in your conversation since your previous manage_context call (or since the start of the task if this is your first call) up to (but not including) the message that issued the call. The system prompt and the original task are always preserved. The original messages in the compressed range are saved to disk; the tool returns a summary of paths explored, reasoning, and conclusions, prefixed with "[summary_id: N]".
+
+Use the "query_memory" tool to retrieve detailed information from any prior summary's original messages by referencing the summary_id."""
+
+# _MEMORY_MANAGEMENT_STRATEGY (prompts.py), 4 bullets, search -> code wording.
+ACM_STRATEGY_V2 = """\
+Strategy:
+- If you are not confident in your diagnosis or fix, investigate more — read the relevant code and run tests to corroborate or contradict your hypothesis. Do not submit a low-confidence fix when more investigation is still cheap.
+- Watch the [CURRENT CONTEXT TOKEN: N] marker at the end of each tool result. When it climbs and your recent steps contain dead ends or duplicates, call "manage_context" to compress them into a [summary_id: N] entry, freeing space. Do not write this marker in your own responses; it is an environmental signal you consume, not produce.
+- If a prior summary looks relevant to a new direction, call the "query_memory" tool to pull detailed content out of that summary's original messages.
+- Calling the "manage_context" tool or the "query_memory" tool does not end the task. After these tools return, continue working — they exist to make room for and surface more evidence, not to wrap up. Only submit when you are confident in your fix."""
+
+
+def build_system_addendum(memory_policy: str, harness: str, context_cap: int) -> str:
+    """Text appended to mini-swe-agent's system template. v1: ACM addendum on
+    A3 only. v2: ACM's layout — memory header (A3), context-window line (all
+    arms), strategy block (A3)."""
+    is_acm = memory_policy in ("acm", "acm_nudge")
+    if harness != "v2":
+        return ACM_SYSTEM_ADDENDUM if is_acm else ""
+    parts = []
+    if is_acm:
+        parts.append(ACM_HEADER_V2)
+    parts.append(CONTEXT_WINDOW_LINE_V2.format(context_window=context_cap))
+    if is_acm:
+        parts.append(ACM_STRATEGY_V2)
+    return "\n\n" + "\n\n".join(parts)
+
+
+# _SUMMARY_INSTRUCTION / _SUMMARY_INSTRUCTION_NOQUERY (prompts.py), adapted to
+# code. Sent as ONE user message, no system prompt, like call_summarizer.
+_SUMMARY_INSTRUCTION_V2 = """\
+Original task: {question}
+
+Conversation to compress:
+
+{conversation}
+
+Compress the conversation above into a working-memory entry. This entry
+replaces the archived messages in the agent's working context{query_clause}.
+
+Coverage:
+- Knowledge state — facts established about the codebase and the bug, with
+  file paths and line numbers; candidate root causes and fixes with the
+  evidence supporting or contradicting each; edits already made and their
+  test results; hypotheses already ruled out and what eliminated them;
+  remaining open sub-questions.
+- Thoughts — a concise distillation of the most recent reasoning chain
+  from the latest assistant turns (what direction the agent has converged
+  on and why), AND the concrete next step the agent should take after
+  this compression (specific file to read or edit / test to run{query_step} —
+  not a generic "continue investigating").
+
+Output exactly one <memory>...</memory> block with the two sections in
+this order:
+
+<memory>
+## Knowledge state
+<facts, candidates, eliminated hypotheses, open sub-questions, in short prose>
+
+## Thoughts
+<a few sentences distilling the latest reasoning thread, followed by 1-2
+sentences naming the concrete next step>
+</memory>
+
+- ≤ 4096 tokens total inside the block, so try to be concise but still cover all the important information.
+- Preserve identifiers verbatim — file paths, function and class names, line numbers, test ids, error messages.
+- Do not enumerate every command you ran.
+- After closing the chat-template-opened `</think>`, your very next token
+  must be `<memory>`. Do NOT emit any preamble between `</think>` and
+  `<memory>` — no `Thinking Process:` heading, no numbered planning list,
+  no `Analysis:` / `Plan:` / `Let me ...` lead-in, no re-stated rules,
+  no re-quoted task. Plan inside `<think>` if you need to plan;
+  the visible output starts directly with `<memory>` and ends with
+  `</memory>`."""
+
+# QUERY_MEMORY_PROMPT (prompts.py), identifiers switched to code ones.
+QUERY_MEMORY_PROMPT_V2 = """\
+Saved messages under summary_id={summary_id}:
+
+{history}
+
+Recall request — extract content relevant to: {query}
+
+Output format (strict):
+- Put any internal reasoning inside <think>...</think> — these will be stripped.
+- After </think>, write the recall as compact bullets only. No prose preamble. No restatement of the query. No address to the reader (no "the user", "the agent", "you").
+- Each bullet must carry concrete identifiers (file paths, line numbers, function and class names, test ids, error messages) verbatim — never paraphrase code or error text.
+- Group into up to three sections (omit any that are empty):
+  - **Relevant findings:** facts that bear on the query, with supporting file paths / line numbers.
+  - **Dead ends:** commands / files / hypotheses tried that produced nothing.
+  - **Open / unresolved:** most promising direction still to verify.
+- If nothing in the saved messages is relevant, output exactly: `(nothing relevant under summary_id={summary_id})`."""
+
+# STOP_PROMPT (prompts.py) adapted: SWE's "final answer" is the patch.
+STOP_PROMPT_V2 = (
+    "The task must now conclude. You have reached the context window limit.\n\n"
+    "IMPORTANT: Do NOT run any more exploration or test commands. Submit your current work "
+    "RIGHT NOW by running exactly this as the entire command:\n"
+    "cd /testbed && echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git diff\n"
+    "If you have made no edits, run it anyway so an empty patch is recorded."
+)
+# If the model ignores the STOP, the harness submits the tracked-file diff itself
+# (ACM ends the episode after one post-STOP generation regardless).
+FORCED_SUBMIT_CMD = "cd /testbed && echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git diff"
+
+# Tool schemas exactly as the paper prints them (App. B.2), "investigation" -> "task".
+MANAGE_CONTEXT_TOOL_V2 = {
+    "type": "function",
+    "function": {
+        "name": "manage_context",
+        "description": (
+            "Compress your working memory. Call this when context is filling up with dead ends, "
+            "duplicates, or detail you no longer need verbatim. The system automatically picks the "
+            "range to compress: everything since your last manage_context call (or since the start "
+            "of the task if this is your first call) up to (but not including) the message that "
+            "issued this tool call. The system prompt and the original task are always preserved. "
+            "The original messages in the compressed range are saved to disk as "
+            "summary_{summary_id}.json (retrievable later with query_memory(summary_id, query)), "
+            "and a fresh summary --- focused on paths explored, reasoning, and conclusions --- is "
+            "returned as the tool result. The summary text is prefixed with \"[summary_id: N]\" so "
+            "you can refer to it directly in subsequent reasoning and pull the raw content back via "
+            "query_memory(summary_id=N, ...). This tool takes no arguments."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+QUERY_MEMORY_TOOL_V2 = {
+    "type": "function",
+    "function": {
+        "name": "query_memory",
+        "description": (
+            "Retrieve detailed information from a previously compressed summary. Each "
+            "manage_context call returns a summary prefixed with [summary_id: N] and saves the "
+            "original messages to disk as summary_{N}.json. This tool loads "
+            "summary_{summary_id}.json and uses an LLM to extract information matching your query "
+            "from the original (uncompressed) content. DO NOT CALL THIS TOOL until at least one "
+            "manage_context call has produced a summary_id."
+        ),
+        "parameters": QUERY_MEMORY_TOOL["function"]["parameters"],
+    },
+}
+MEM_TOOLS_V2 = [MANAGE_CONTEXT_TOOL_V2, QUERY_MEMORY_TOOL_V2]
+
+_MEMORY_RE = re.compile(r"<memory>(.*?)</memory>", re.DOTALL | re.IGNORECASE)
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_memory(text: str) -> tuple[str, bool]:
+    """runner.py _extract_memory: inner <memory> text, parse_ok iff a bounded
+    block of >=50 chars with no nested <memory> / </think>."""
+    if not text:
+        return "", False
+    m = _MEMORY_RE.search(text)
+    if m:
+        inner = m.group(1).strip()
+        if len(inner) >= 50 and "<memory>" not in inner and "</think>" not in inner:
+            return inner, True
+    return text.strip(), False
+
+
+def _install_memory_tools(model, mem_tools=None):
     """Rebind `model` to a subclass that advertises the two memory tools and
     accepts their tool calls. mini-swe-agent hardcodes tools=[BASH_TOOL] in
     _query and parse_toolcall_actions raises FormatError on any other name, so
@@ -224,6 +405,7 @@ def _install_memory_tools(model):
     error semantics are unchanged."""
     from minisweagent.models.utils.actions_toolcall import parse_toolcall_actions
 
+    tools = [BASH_TOOL, *(mem_tools or MEM_TOOLS)]
     base = type(model)
     if getattr(base, "_acm_memory_tools", False):
         return model
@@ -235,7 +417,7 @@ def _install_memory_tools(model):
             return litellm.completion(
                 model=self.config.model_name,
                 messages=messages,
-                tools=[BASH_TOOL, *MEM_TOOLS],
+                tools=tools,
                 **(self.config.model_kwargs | kwargs),
             )
 
@@ -280,12 +462,21 @@ class MemoryAgent(DefaultAgent):
         summarize_at: int = 28000,
         keep_last_k: int = 3,
         force_frac: float = 0.95,   # ACM's threshold (runner.py:930)
+        harness: str = "v1",        # v1 = every run up to Nov 2026; v2 = docs/acm_vs_ours.md
+        marker_all_arms: bool = False,  # v2: also show A1/A2 the token marker (ACM's ReAct gets it)
         **kwargs,
     ):
         super().__init__(model, env, **kwargs)  # memory_* are captured here, not passed to AgentConfig
+        # acm_nudge = ACM + the scaling-mode compress nudge (what v1 called "acm").
+        self.is_acm = memory_policy in ("acm", "acm_nudge")
+        self.harness = harness
+        self.v2 = harness == "v2"
+        self.nudge = memory_policy == "acm_nudge" or (memory_policy == "acm" and not self.v2)
+        self.marker_on = self.is_acm or (self.v2 and marker_all_arms)
+        self._mem_tools = MEM_TOOLS_V2 if self.v2 else MEM_TOOLS
         self.memory_policy = memory_policy
-        if memory_policy == "acm":
-            _install_memory_tools(model)
+        if self.is_acm:
+            _install_memory_tools(model, self._mem_tools)
         self.context_cap = context_cap
         self.summarize_at = summarize_at
         self.keep_last_k = keep_last_k
@@ -321,6 +512,10 @@ class MemoryAgent(DefaultAgent):
         self._compress_prompt_count = 0   # A3: ACM's bounded compress-nudge retries
         self._compress_prompts_total = 0  # cumulative (the above resets under 90%)
         self._stop_prompted = False       # A3: STOP_PROMPT is injected at most once
+        self._stop_call = None            # v2: n_calls of the one post-STOP generation
+        self._boundary_after_obs = False  # v2: move the mc boundary after the summary tool msg
+        self._summary_parse_fail = 0      # v2: summaries that fell back to raw text
+        self._forced_submit = False       # v2: STOP ignored, harness submitted the diff
         # Append-only mirror of every message ever added, never compressed — ACM's
         # HistoryManager.raw_messages ("for traj dumps"). self.messages loses the
         # compressed spans, so without this the full trajectory is unrecoverable.
@@ -365,8 +560,31 @@ class MemoryAgent(DefaultAgent):
         tok = self._get_tokenizer()
         if tok is not None:
             try:
-                ids = tok.apply_chat_template(api_msgs, tools=self._tools_for_counting(),
+                # Qwen's template iterates tool_call.arguments as a mapping; vLLM
+                # json-decodes the string before rendering, so do the same here or
+                # every history with a tool call falls through to /tokenize.
+                tpl_msgs = []
+                for m in api_msgs:
+                    if m.get("tool_calls"):
+                        m = dict(m)
+                        tcs = []
+                        for tc in m["tool_calls"]:
+                            tc = json.loads(json.dumps(tc, default=str))
+                            fn = tc.get("function") or {}
+                            if isinstance(fn.get("arguments"), str):
+                                try:
+                                    fn["arguments"] = json.loads(fn["arguments"] or "{}")
+                                except Exception:
+                                    pass
+                            tcs.append(tc)
+                        m["tool_calls"] = tcs
+                    tpl_msgs.append(m)
+                ids = tok.apply_chat_template(tpl_msgs, tools=self._tools_for_counting(),
                                               add_generation_prompt=True, tokenize=True)
+                # transformers>=5 returns a BatchEncoding {input_ids, attention_mask};
+                # len() of it is 2, which silently disabled every threshold.
+                if hasattr(ids, "keys") and "input_ids" in ids:
+                    ids = ids["input_ids"]
                 if ids and isinstance(ids[0], list):
                     ids = ids[0]
                 return len(ids)
@@ -392,7 +610,7 @@ class MemoryAgent(DefaultAgent):
     def _tools_for_counting(self) -> list[dict]:
         """The tool schemas count toward the prompt, so A3 must include its two
         extra tools or every threshold is computed against the wrong budget."""
-        return [BASH_TOOL, *MEM_TOOLS] if self.memory_policy == "acm" else [BASH_TOOL]
+        return [BASH_TOOL, *self._mem_tools] if self.is_acm else [BASH_TOOL]
 
     def _projected(self, messages: list[dict]) -> int:
         """count + output reservation = a conservative upper bound on the next
@@ -403,7 +621,105 @@ class MemoryAgent(DefaultAgent):
         return [i for i, m in enumerate(self.messages) if m.get("role") == "assistant"]
 
     # ── summarization (shared by A2 and A3) ─────────────────────────────
+    # ── v2 span formatting: what the summarizer / querier reads ──────────
+    @staticmethod
+    def _render_msg(m: dict, with_reasoning: bool = True, max_obs_chars: int | None = None) -> str:
+        """[role] + reasoning + content + tool calls. v1 (and ACM) send only
+        `content`, which is None on every tool-call turn under our reasoning
+        parser, so the summarizer saw neither the agent's thinking nor its
+        commands."""
+        role = m.get("role", "?")
+        parts = []
+        if role == "assistant":
+            rc = (m.get("reasoning_content") or "").strip()
+            if with_reasoning and rc:
+                parts.append(f"<think>\n{rc}\n</think>")
+            c = m.get("content")
+            if c not in (None, "", "None"):
+                parts.append(str(c).strip())
+            for tc in m.get("tool_calls") or []:
+                fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                name, args = fn.get("name", "?"), fn.get("arguments") or "{}"
+                try:
+                    a = json.loads(args) if isinstance(args, str) else (args or {})
+                except Exception:
+                    a = {"raw": str(args)}
+                if name == "bash" and isinstance(a, dict) and "command" in a:
+                    parts.append(f"$ {a['command']}")
+                else:
+                    parts.append(f"→ {name}({json.dumps(a)})")
+        else:
+            c = "" if m.get("content") is None else str(m.get("content"))
+            if max_obs_chars and len(c) > max_obs_chars:
+                h = max_obs_chars // 2
+                c = c[:h] + f"\n…[{len(c) - max_obs_chars} chars elided]…\n" + c[-h:]
+            parts.append(c)
+        return f"[{role}]\n" + "\n".join(p for p in parts if p)
+
+    def _span_text(self, msgs: list[dict], budget_tokens: int) -> str:
+        """Render a span within a token budget so the summarizer prompt never
+        exceeds the vLLM cap. Degrades in steps: full → reasoning only on the
+        last 5 assistant turns → observations middle-truncated to 2k chars →
+        keep the most recent text."""
+        tok = self._get_tokenizer()
+        n_tok = (lambda s: len(tok.encode(s))) if tok is not None else (lambda s: len(s) // 3)
+        asst_idx = [i for i, m in enumerate(msgs) if m.get("role") == "assistant"]
+        recent = set(asst_idx[-5:])
+        attempts = [
+            lambda i, m: self._render_msg(m),
+            lambda i, m: self._render_msg(m, with_reasoning=i in recent),
+            lambda i, m: self._render_msg(m, with_reasoning=i in recent, max_obs_chars=2000),
+        ]
+        text = ""
+        for render in attempts:
+            text = "\n\n".join(render(i, m) for i, m in enumerate(msgs))
+            if n_tok(text) <= budget_tokens:
+                return text
+        # last resort: keep the tail (most recent work matters most for "Thoughts")
+        keep = budget_tokens * 3
+        return "…[earlier messages elided]…\n" + text[-keep:]
+
+    def _summarizer_budget(self) -> int:
+        """Prompt room left for the conversation text: cap − output reserve −
+        task − instruction − margin."""
+        task_tok = len(self._task) // 3
+        return max(4000, self.context_cap - self._max_tokens_reserve - task_tok - 1500)
+
+    def _mem_llm(self, prompt: str) -> str:
+        """One plain (tool-free) completion, as ACM's summarizer / querier:
+        a single user message, same model and sampling as the agent."""
+        kwargs = dict(self.model.config.model_kwargs)
+        kwargs.pop("parallel_tool_calls", None)
+        resp = litellm.completion(model=self.model.config.model_name,
+                                  messages=[{"role": "user", "content": prompt}], **kwargs)
+        self._note_mem_op(resp)
+        return _THINK_RE.sub("", resp.choices[0].message.content or "").strip()
+
+    def _summarize_v2(self, span_messages: list[dict]) -> str:
+        """call_summarizer: ACM instruction, <memory> extraction, one retry.
+        Returns the INNER memory text."""
+        conv = self._span_text(span_messages, self._summarizer_budget())
+        prompt = _SUMMARY_INSTRUCTION_V2.format(
+            question=self._task, conversation=conv,
+            query_clause="; future calls to query_memory(summary_id, query) will search this text"
+                         if self.is_acm else "",
+            query_step=" / memory query" if self.is_acm else "")
+        last = ""
+        for attempt in range(2):
+            try:
+                inner, ok = _extract_memory(self._mem_llm(prompt))
+            except Exception as e:
+                self.logger.warning(f"summarizer call failed (attempt {attempt}): {e}")
+                inner, ok = f"(summary unavailable: {e})", False
+            last = inner
+            if ok:
+                return inner
+        self._summary_parse_fail += 1
+        return last
+
     def _summarize(self, span_messages: list[dict]) -> str:
+        if self.v2:
+            return f"<memory>\n{self._summarize_v2(span_messages)}\n</memory>"
         convo = "\n\n".join(f"[{m.get('role')}]\n{str(m.get('content',''))}" for m in span_messages)
         user = f"Original task:\n{self._task}\n\nConversation to compress:\n\n{convo}\n\n{SUMMARIZER_INSTRUCTION}"
         kwargs = dict(self.model.config.model_kwargs)  # api_base, temperature, drop_params, etc.
@@ -478,12 +794,42 @@ class MemoryAgent(DefaultAgent):
         return boundary if boundary > since else -1
 
     # ── pre-call hooks: A2 harness compression, A3 forced-compression nudge ──
+    def _inject_stop(self, why: str) -> None:
+        """runner.py's STOP branch: one STOP message, one more generation, end."""
+        if self._stop_prompted:
+            return
+        self.logger.warning(f"[{self.harness}] {why} — escalating to STOP_PROMPT")
+        self.add_messages({"role": "user", "content": STOP_PROMPT_V2 if self.v2 else STOP_PROMPT,
+                           "extra": {"stop_prompt": True}})
+        self._stop_prompted = True
+        self._stop_call = self.n_calls + 1   # the generation that answers the STOP
+
+    def _force_submit(self):
+        """The post-STOP generation did not submit: submit the tracked-file diff
+        ourselves. ACM ends the episode after that one generation either way."""
+        from minisweagent.exceptions import Submitted
+        self.logger.warning(f"[{self.harness}] STOP ignored — harness submits git diff")
+        self._forced_submit = True
+        self.env.execute({"command": FORCED_SUBMIT_CMD})  # raises Submitted on success
+        raise Submitted({"role": "exit", "content": "",
+                         "extra": {"exit_status": "Submitted", "submission": ""}})
+
     def query(self) -> dict:
+        if self._stop_call is not None and self.n_calls >= self._stop_call:
+            self._force_submit()
         if self.memory_policy == "summarize" and self._projected(self.messages) >= self.summarize_at:
             end = self._compressible_tail_boundary(since=2)
             if end > 2:
                 self._compress_range(2, end, trigger="harness")
-        elif self.memory_policy == "acm":
+            # v2 backstop: compression could not get back under the wall
+            if self.v2 and self._projected(self.messages) >= self.context_cap - STOP_RESERVE:
+                self._inject_stop("still over the wall after compression")
+        elif self.v2 and not self.nudge:
+            # A1 and ACM-faithful A3: STOP at 95%, no compress nudge (runner.py's
+            # default path; the nudge exists only in min_turns / continue modes)
+            if self._projected(self.messages) >= self.summarize_at:
+                self._inject_stop("context at 95%")
+        elif self.is_acm:
             # ACM's per-turn context check (runner.py), in its order:
             #   1. reset the compress-attempt counter once we drop back under 90%
             #   2. at >=force_frac, nudge the model to compress — but only while
@@ -515,15 +861,28 @@ class MemoryAgent(DefaultAgent):
                         self._compress_prompts_total += 1
                 elif not self._stop_prompted:
                     why = "out of headroom" if out_of_room else "nudges exhausted"
-                    self.logger.warning(
-                        f"[acm] {why} (nudges={self._compress_prompt_count}, count={count}, "
-                        f"hard_limit={hard_limit}) — escalating to STOP_PROMPT")
-                    self.add_messages({"role": "user", "content": STOP_PROMPT,
-                                       "extra": {"stop_prompt": True}})
-                    self._stop_prompted = True
+                    self._inject_stop(f"{why} (nudges={self._compress_prompt_count}, count={count}, "
+                                      f"hard_limit={hard_limit})")
+                    if not self.v2:
+                        self._stop_call = None  # v1 had no forced submit
         # one-time calibration: does our token count match vLLM's real prompt?
         pre_count = self._count_tokens(self.messages) if not self._calibrated else None
-        msg = super().query()
+        # v2 marker: history.get_messages_for_model(token_hint=N) — appended to
+        # the LATEST tool message of the outgoing copy only, never stored
+        marked, orig = None, None
+        if self.v2 and self.marker_on:
+            proj = self._projected(self.messages)
+            marked = next((m for m in reversed(self.messages) if m.get("role") == "tool"), None)
+            if marked is not None and isinstance(marked.get("content"), str):
+                orig = marked["content"]
+                marked["content"] = orig + f"\n\n[CURRENT CONTEXT TOKEN: {proj}]"
+            else:
+                marked = None
+        try:
+            msg = super().query()
+        finally:
+            if marked is not None:
+                marked["content"] = orig
         usage = ((msg.get("extra", {}).get("response") or {}).get("usage") or {})
         pt, ct = usage.get("prompt_tokens"), usage.get("completion_tokens")
         if pt is not None:
@@ -532,8 +891,14 @@ class MemoryAgent(DefaultAgent):
         if pre_count is not None:
             actual = ((msg.get("extra", {}).get("response") or {}).get("usage") or {}).get("prompt_tokens")
             if actual:
+                ratio = actual / max(1, pre_count)
                 self.logger.warning(f"[token-calib] my_count={pre_count} vLLM_prompt_tokens={actual} "
-                                    f"ratio={actual/max(1,pre_count):.3f}")
+                                    f"ratio={ratio:.3f}")
+                if not 0.9 <= ratio <= 1.1:
+                    # every threshold (compression, nudge, STOP) is computed from
+                    # this count; a wrong counter silently disables them all
+                    self.logger.error(f"[token-calib] TOKEN COUNT MISMATCH ratio={ratio:.3f}: "
+                                      f"thresholds will fire at the wrong context size")
             self._calibrated = True
         return msg
 
@@ -545,7 +910,7 @@ class MemoryAgent(DefaultAgent):
                              ("manage_context" if (a.get("command") or "").strip() == "manage_context"
                               else "query_memory" if (a.get("command") or "").startswith("query_memory")
                               else "bash")] += 1
-        if self.memory_policy != "acm":
+        if not self.is_acm:
             out = super().execute_actions(message)
             self._record_obs(out)
             return out
@@ -555,15 +920,20 @@ class MemoryAgent(DefaultAgent):
             tool = action.get("mem_tool")          # set when it arrived as a real tool call
             args = action.get("mem_args") or {}
             if tool == "manage_context" or cmd == "manage_context":
-                outputs.append(self._handle_manage_context())
+                outputs.append(self._handle_manage_context_v2() if self.v2 else self._handle_manage_context())
             elif tool == "query_memory" or cmd.startswith("query_memory"):
                 outputs.append(self._handle_query_memory(cmd, args))
             else:
                 out = self.env.execute(action)
                 out = dict(out)
-                out["output"] = (out.get("output") or "") + _memory_marker(self._projected(self.messages))
+                if not self.v2:  # v2 marks only the latest tool message, at query time
+                    out["output"] = (out.get("output") or "") + _memory_marker(self._projected(self.messages))
                 outputs.append(out)
         msgs = self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+        if self._boundary_after_obs:
+            # runner.py: new_last_boundary_pos = len(hm.messages) after the summary tool msg
+            self._last_mc_end = len(self.messages)
+            self._boundary_after_obs = False
         self._record_obs(msgs)
         return msgs
 
@@ -572,8 +942,37 @@ class MemoryAgent(DefaultAgent):
         exception_info key: swebench.yaml's observation_template does
         `{% if output.exception_info %}` under StrictUndefined, which raises
         UndefinedError if the key is absent."""
-        return {"output": text + _memory_marker(self._projected(self.messages)),
-                "returncode": returncode, "exception_info": None}
+        marker = "" if self.v2 else _memory_marker(self._projected(self.messages))
+        return {"output": text + marker, "returncode": returncode, "exception_info": None}
+
+    def _handle_manage_context_v2(self) -> dict:
+        """runner.py _handle_manage_context with mc_drop_call_message=True:
+        compress [last boundary, calling assistant turn] inclusive, delete it,
+        and return the summary itself as the tool result. Earlier summaries
+        (tool messages before the boundary) stack untouched."""
+        start = self._last_mc_end
+        end = len(self.messages)  # the calling assistant turn is the last message
+        if end <= start:
+            return self._obs("Error: nothing to compress. There are no messages between your "
+                             "previous manage_context call and this one.")
+        forced = any(m.get("extra", {}).get("force_compress") for m in self.messages[max(0, end - 3):end])
+        original = copy.deepcopy(self.messages[start:end])
+        before = self._count_tokens(self.messages)
+        inner = self._summarize_v2(original)
+        sid = self.n_edits + 1
+        feedback = f"[summary_id: {sid}] {inner}"
+        del self.messages[start:end]
+        self.archive.append({"summary_id": sid, "messages": original})
+        self.n_edits += 1
+        summary_tokens = self._count_tokens([{"role": "user", "content": feedback}])
+        self._pending_edit = {
+            "type": "summarize", "trigger": "forced" if forced else "voluntary",
+            "span": [start, end], "tokens_before": before,
+            "tokens_after": self._count_tokens(self.messages) + summary_tokens,
+            "summary_tokens": summary_tokens, "summary_id": sid, "n_compressed": len(original),
+        }
+        self._boundary_after_obs = True
+        return self._obs(feedback)
 
     def _handle_manage_context(self) -> dict:
         # compress everything since the last manage_context up to (not incl.) the
@@ -610,6 +1009,20 @@ class MemoryAgent(DefaultAgent):
         except (TypeError, ValueError):
             return self._obs("query_memory: summary_id must be an integer.", returncode=1)
         entry = next((a for a in self.archive if a["summary_id"] == sid), None)
+        if self.v2:  # runner.py _handle_query_memory, error texts verbatim
+            if not query:
+                return self._obs("Error: missing required parameters (summary_id, query).", returncode=1)
+            if entry is None:
+                return self._obs(f"Error: summary_id {sid} not found.", returncode=1)
+            history = self._span_text(entry["messages"], self._summarizer_budget())
+            try:
+                found = self._mem_llm(QUERY_MEMORY_PROMPT_V2.format(
+                    summary_id=sid, history=history, query=query))
+            except Exception as e:
+                self.logger.warning(f"query_memory extraction failed: {e}")
+                found = f"(retrieval unavailable: {e})"
+            self.n_retrievals += 1
+            return self._obs(f"[query_memory: summary_id={sid}]\n\n{found}")
         if entry is None:
             have = sorted(a["summary_id"] for a in self.archive)
             return self._obs(f"query_memory: no summary_id={sid} (have {have}).", returncode=1)
@@ -727,6 +1140,11 @@ class MemoryAgent(DefaultAgent):
                              if self._usage else None),
             "compress_prompts": self._compress_prompts_total,
             "stop_prompted": self._stop_prompted,
+            "harness": self.harness,
+            "nudge": self.nudge,
+            "marker_on": self.marker_on,
+            "forced_submit": self._forced_submit,
+            "summary_parse_fail": self._summary_parse_fail,
             "n_raw_messages": len(self.raw_messages),
             "saved_at": time.time(),
         }

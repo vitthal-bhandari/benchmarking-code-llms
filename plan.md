@@ -970,3 +970,37 @@ the replicates, never mid-table.
 
 Order: Step A (Klone scoring + fetch 353099) ∥ dumpling bring-up → T4, T3, T1, T2
 (no sandbox) → calibration (64k A3 seed 1) → 64k seeds → 128k seeds.
+
+### Revision (Nov 18, evening): harness v2 and the dumpling run plan
+Decided with the advisor-facing goal "faithful to ACM before spending GPU time".
+Full audit: `docs/acm_vs_ours.md`. Implemented as `--harness v2` (v1 stays the
+default, so old runs reproduce). Offline test: `scripts/test_harness_v2.py` (all pass;
+needs only mini-swe-agent 2.4.6 + transformers, no GPU).
+
+v2 = A1 STOP at 95% (harness submits `git diff` if ignored) · summarizer/querier see
+reasoning + commands, with a token budget · marker on the latest tool message only,
+transient · `manage_context` returns the summary as its tool result and drops the
+calling turn · context-window line in every arm's prompt · ACM header/strategy,
+summarizer, recall prompt and tool descriptions · policies `acm` (faithful: STOP at
+95%) and `acm_nudge` (v1 behaviour).
+Pending flags, default off: `MARKER_ALL_ARMS=1`; A2 `KEEP_LAST_K=0` (paper's
+summary agent) is not supported yet. Tool scaffold unchanged (bash only).
+
+**Bug found while testing (fixed):** with transformers ≥5, `apply_chat_template(
+tokenize=True)` returns a dict, so the local counter returned 2 tokens for any
+context and no threshold would ever fire. The clusters ran transformers 4 (calibration
+1.000). A fresh dumpling install would have hit this silently. Calibration now logs
+`TOKEN COUNT MISMATCH` outside 0.9–1.1, and the counter also json-decodes tool-call
+arguments like vLLM does, so local counting no longer falls back to `/tokenize`.
+
+**Dumpling run plan** (scripts: `dumpling_setup.sh`, `dumpling_run.sh`, `dumpling_queue.sh`):
+1. Setup under `/mnt/disk2/$USER` (vLLM 0.21.0 like Tillicum; mini-swe-agent 2.4.6;
+   unprivileged Apptainer if user namespaces allow, else wait for the docker group).
+2. Smoke: astropy-12907, `acm`, v2, 1 worker, 60 steps. Check `[token-calib]` ≈1.000,
+   one marker per request, a STOP or compression event, and A40 s/step.
+3. 64k, seeds 1–3, step limit 1000, one queue per GPU (each seed's four arms finish together):
+   GPU0 `none, acm` × s1..s3 · GPU1 `summarize, acm_nudge` × s1..s3 → 12 runs.
+4. 128k, seeds 1–3: `none, summarize, acm` → 9 runs.
+5. Score every run on Klone (`score_runs.sh`); move preds dumpling → GitHub → Klone.
+Docker Hub: no SIF prefetch on dumpling (disk); with `DOCKER_*` in `.env`, two
+concurrent 99-instance runs make ~200 manifest pulls per ~16 h, inside the 200/6 h limit.
