@@ -699,6 +699,38 @@ accepted, but `vitthal1` is refused with both the ed25519 and RSA keys. Ask Lucy
 confirm the key `SHA256:x3b1poS5XENxlo04zJR9VaG1cIua9P049G9+LXZIWB8` and the
 username. `~/.ssh/config` still has no `Host dumpling` block.
 
+**Access status (Nov 18): login works** (`ssh vitthal1@dumpling.ischool.uw.edu`,
+Ubuntu 22.04.5, kernel 6.8.0-nvidia). `$HOME` is empty but `/home` is **93.8% full**
+(of 393 GB) and `/tmp` is 88.1% full (of 3.4 TB). Keep everything (repo, venvs, HF,
+uv and container caches) on `/mnt/disk1` or `/mnt/disk2`. Tillicum credits are
+used up and a renewal is pending, so dumpling is now the only GPU box. Work
+continues on branch `mvp3` (mvp2 fully merged into master as PR #85).
+
+**Inventory (Nov 18):**
+| Item | Finding | Consequence |
+|---|---|---|
+| GPUs | 2× A40 46 GB, both idle; driver 580.119, CUDA 13.0 | vLLM wheels bundle their own CUDA runtime, so no toolkit is needed |
+| nvcc | absent | fine unless a kernel has to be JIT-built from source |
+| CPU / RAM | 64 cores, 755 GB | plenty of room for scoring parallelism |
+| `/mnt/disk1` | 240 GB free (93% used), mode 777 | |
+| `/mnt/disk2` | 376 GB free (89% used), mode 777 | **use disk2**; make `/mnt/disk2/vitthal1` |
+| docker | installed, **permission denied** (groups: `vitthal1 dumpling`) | blocker for SWE-bench sandboxes |
+| apptainer / podman | absent | |
+| uv | absent | install to user space (`~/.local/bin`, cache on disk2) |
+| tmux, git, python3 | present | |
+
+**Container blocker, options:** (a) ask Lucy or the admin to add `vitthal1` to the
+`docker` group. Simplest, but that group is root-equivalent, so they may refuse.
+(b) Install unprivileged Apptainer (`install-unprivileged.sh`) on disk2 and reuse
+the Klone SIF path we already have. This needs unprivileged user namespaces.
+(c) Rootless Docker, which also needs user namespaces plus `newuidmap`. Try (b)
+first since it needs no admin, and ask for (a) in parallel.
+
+**Disk budget (disk2, 376 GB):** small-model weights (0.8B to 4B) are ~20 GB,
+two vLLM venvs ~20 GB, SWE-bench SIFs or images for a 99-instance slice are
+~100–200 GB. It fits, but there's no room for the full 500-instance image set.
+Prune images after scoring.
+
 ### Memory fits; speed is the constraint
 Every model we use is hybrid attention, so KV cache is small:
 | Model | Full-attention layers | KV per token (bf16) | One 128K sequence |
@@ -811,3 +843,130 @@ with idea 4 as the causal analysis.
 - Distillation from a larger teacher as a comparison point for idea 3. This needs a
   shared tokenizer (check Qwen3.5 vs Qwen3.6) and Qwen3.6-35B-A3B-FP8 is tight on
   one A40.
+
+---
+
+## Plan — Nov 18 2026 (after advisor meeting; supersedes the small-model draft for now)
+
+Advisor asks: (1) a careful qualitative account of A2 vs A3, (2) whether a
+harness change can make untrained A3 more proactive, (3) new results for the
+next meeting. Primary model stays **Qwen3.5-9B**; 4B only if time allows. All
+GPU work runs on dumpling (Tillicum renewal pending).
+
+### Where (1) stands
+Done offline (see report.md "A2 vs A3: harness effect or noise?"). Headline: on
+Qwen the A2–A3 gap is within run-to-run noise (two runs of the same arm flip
+26–31% of instances). Real differences come from the fallback (32k) and possibly
+from the prompt on Gemma. Next steps for (1) are the controlled experiments in step C.
+
+### Step A — score what we already have (no GPU; do first)
+The 1000-step sweep (3531xx) is unscored. Score its complete runs on Klone
+(Apptainer, horizontally split per [[apptainer-eval-parallelism]]):
+- complete (99/99): qwen 64k none 353102 / acm 353104, qwen 32k summarize
+  353100 / acm 353101, qwen 128k none 353105 / summarize 353106, mimo 64k none
+  353111, all 6 gemma 64k/128k runs.
+- partial: qwen 64k summarize 353103 (62), qwen 128k acm 353107 (93),
+  mimo 64k summarize 353112 (58) / acm 353113 (94), mimo 128k ×3 (5–55).
+- missing: qwen 32k none 353099 finished on Tillicum but is not in `runs/`;
+  fetch it if Tillicum storage is still readable. mimo 32k ×3 and gemma 32k ×3 never ran.
+Payoff: Pass@1 at 1000 steps for Lucy, and a **third replicate** of qwen 64k
+none/acm (and a partial one for summarize) for the noise-floor table.
+Check first: does the Klone allocation still work while Tillicum is out?
+
+### Step B — dumpling bring-up + calibration
+1. Container path (Docker group request to Lucy, unprivileged Apptainer meanwhile).
+2. Port the runner (see "Port checklist" above).
+3. Calibration run: qwen35-9b A3 at 64k, step 500, 99 instances, new seed.
+   It measures A40 speed (H200 took ~8 h per 64k run with 8 workers, ~8.5 s/step)
+   and is itself a third A3 replicate. Expected on A40: ~16–24 h per run, so
+   **~2 runs/day using both GPUs**.
+
+### Step C — make the A2/A3 comparison decisive (attribution)
+Design: 2×2 at Qwen 64k: prompt {plain, ACM addendum + tools + marker} ×
+fallback {forced harness compression, nudge → model compresses}. The four arms
+are A2, A2+ACM-prompt, A3 with a forced backstop, and A3. Use ≥3 seeds per arm,
+paired McNemar plus a mixed-effects model across seeds. That is 12 runs, about 6
+days of dumpling, so cut to step 250 or a 50-instance subset if the calibration
+shows A40 is slower than 2×. This separates the prompt effect (Finding 3) from
+the fallback effect (32k) and from noise. Optional: rerun Gemma A2/A3 to test
+the one candidate harness effect.
+
+### Step D — inducing proactivity in untrained A3 (question 2)
+Screen cheaply first: 20–30 instances, 64k, step 250, **no scoring**. The metric is
+behavioural: voluntary call rate, context % at call time, compressions that land
+at milestones. Only variants that move that metric get full runs with seeds.
+Variants, least to most invasive:
+| id | change | why it might work |
+|---|---|---|
+| P0 | no 95% fallback (pure A3) | removes the crutch; true untrained baseline; deaths are the cost |
+| P1 | budget-salient marker: `[CONTEXT 41.2k / 65.5k (63%), 24k left]` | raw count gives no sense of scale; Qwen never mentions it |
+| P2 | explicit policy in the system prompt ("call manage_context past 60% or after reproducing the bug / locating the root cause / verifying the fix") | turns a vague permission into a rule tied to task milestones |
+| P3 | few-shot: one short worked example of a milestone compression in the prompt | ICL demonstrations move tool use more than descriptions do |
+| P4 | soft graded hints at 50 / 70% (logged as `hinted`, not voluntary) | measures hint-responsiveness, the step between forced and voluntary |
+| P5 | reframe the tool as `checkpoint(progress_note)`: the model writes what to keep | looks like task progress (which models are trained for), and the summary is model-authored |
+| P6 | "state your context % before each action" in reasoning | forces attention to the marker |
+| P7 | training (hindsight self-distillation, ideation idea 3) | the real fix if P1–P6 stay near 0% |
+Report the voluntary-rate ladder P0→P6 as a result in its own right ("how much
+harness pressure untrained proactivity needs"), regardless of Pass@1.
+
+### Step E — rerun vs score (decision)
+Score the existing sweep (Step A). Do **not** rerun the full 27-run sweep on
+dumpling (~480 A40 GPU-hours, ~10 days of both GPUs). After Finding 1, seeds on
+the Qwen 64k cell are worth more than more cells. Finish missing or partial cells
+only where the Lucy table needs them, and on one machine per table (comparability rule).
+
+### For Lucy's next meeting
+1. Noise floor + withdrawn A3>A2 claim (ready now).
+2. 1000-step sweep Pass@1 (after Step A).
+3. Proactivity screen P0–P3 voluntary rates (after Step B, ~3–4 dumpling days).
+
+### Revision (Nov 18, later): seeds and claim tests (supersedes Steps B, C and E above)
+Facts: Tillicum storage is readable (fetch `qwen35-9b-32k_none_353099` and any
+unsynced partial runs). Klone is free and always available, so all scoring goes there.
+Visual explainer: `site/a2-vs-a3/index.html` (published as an artifact).
+
+**Replicates. Different seeds, not the same seed repeated.** Seed 0 is already
+fixed and reruns still diverge (vLLM batching), so repeating one seed measures
+only infra nondeterminism and *underestimates* the sampling noise we need to
+bound. Use seeds 0, 1, 2 (4, 5 if needed). Replicates don't remove the noise;
+they shrink the CI on each arm's mean. Paired A3−A2 SD per run is ≈0.055
+(30% discordant on 99), so with k seeds the 95% CI is ≈ ±0.11/√k: k=3 → ±0.06,
+k=5 → ±0.05. Claiming equivalence at a ±0.05 margin needs ~5 seeds.
+
+Design (Qwen3.5-9B, 99 instances, step_limit 1000, all three arms, dumpling only):
+1. **64k × {A1, A2, A3} × 3 seeds** first: 74/99 instances compress, so this
+   is where the arms differ mechanically.
+2. **128k × {A1, A2, A3} × 3 seeds** next: 73/99 instances never compress, so
+   this budget is a clean test of the prompt effect *alone*. It also gives CIs
+   on the "memory hurts at 128k" sign flip.
+Cost guess: H200 s1000 64k ≈ 24 GPU-h per seed for 3 arms → ~48 A40-h per seed
+→ 64k ×3 ≈ 3 days on both GPUs; 128k ×3 ≈ 4–5 days. The H200 1000-step sweep
+(seed 0) scored on Klone serves as a hardware cross-check, pooled only if the
+calibration shows it matches. Figure: Pass@1 mean ± 95% CI per arm per budget,
+plus per-instance resolve probability, A2 vs A3 scatter.
+
+**Claim tests. Steps T1–T4 need only vLLM (no SWE-bench sandbox), so they can run
+on dumpling before the Docker/Apptainer blocker is solved:**
+| test | claim | how | cost |
+|---|---|---|---|
+| T1 marker swap | Qwen ignores its context | replay ~200 saved pre-nudge A3 prompts (64k) with every marker rewritten to 20% vs 95% of cap; sample K=8 each; compare P(manage_context), reasoning mentions | ~1–2 h |
+| T2 propensity curve | same | at each saved step, prefill `<tool_call>{"name": "` and read logprob of `manage_context` vs `bash`; plot against context % | ~1 h |
+| T3 readability probe | can't perceive vs won't act | at saved states ask "what is your current context usage?" and score the answer against the true marker | minutes |
+| T4 first-action shift | prompt changes the path | 99 instances × K=10 first actions under plain vs ACM prompt (step 1 needs no sandbox); compare within-prompt vs cross-prompt agreement | minutes |
+| T5 outcome equivalence | path changes, outcome doesn't | the seed replicates above; paired TOST on A3−A2 (margin 0.05); at 128k restrict to never-compressed instances | seeds |
+If T1/T2 show the model's tool propensity *does* rise with the marker (just never
+reaching sampling), the claim becomes "latent but sub-threshold awareness". That is a
+more interesting result, and the reason to run T2 and not only regex the transcripts.
+
+**New behavioural difference to report:** A3 starts over after 95–98% of
+compressions ("Let me start by…") against 5% for A2, because A3 keeps no recent
+turns and the tool reply says only "Continue working". Re-read rates are high in
+both arms (70–89%).
+
+**Known flaw in both arms:** `_summarize` reads only `content`, and tool-call
+turns have `content=None`, so the summarizer never sees the agent's commands or
+reasoning. Fixing it changes results, so do it as a new arm version only after
+the replicates, never mid-table.
+
+Order: Step A (Klone scoring + fetch 353099) ∥ dumpling bring-up → T4, T3, T1, T2
+(no sandbox) → calibration (64k A3 seed 1) → 64k seeds → 128k seeds.
