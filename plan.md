@@ -1004,3 +1004,15 @@ arguments like vLLM does, so local counting no longer falls back to `/tokenize`.
 5. Score every run on Klone (`score_runs.sh`); move preds dumpling → GitHub → Klone.
 Docker Hub: no SIF prefetch on dumpling (disk); with `DOCKER_*` in `.env`, two
 concurrent 99-instance runs make ~200 manifest pulls per ~16 h, inside the 200/6 h limit.
+
+### TODO: trim the repo (noted Nov 19)
+A fresh clone is 593 MB / 19,191 files and took minutes on Klone's scratch filesystem.
+95% of the files are trajectories (`runs/*/*.traj.json`, `raw_messages.json`,
+`memory_trace.json`: 11,945) and per-instance eval logs (`logs/apptainer_eval/`: 6,327).
+Options: (a) one compressed archive per run instead of per-instance files; (b) move
+trajectories/eval logs to a separate data repo or an HF dataset, keep `preds.json` + the
+aggregate tables here; (c) shrinking the clone itself needs a history rewrite
+(`git filter-repo`). That is destructive and needs a force-push, so do it only when no
+cluster checkout has unpushed work. Stopgap until then: clone clusters with
+`--filter=blob:none` plus a sparse checkout of what each job needs.
+Do this after the Klone scoring and the first dumpling runs have been pushed, not during them.
