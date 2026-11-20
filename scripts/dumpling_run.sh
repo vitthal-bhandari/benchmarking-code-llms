@@ -18,7 +18,9 @@ CFG="${1:?usage: dumpling_run.sh configs/models/<model>.env <none|summarize|acm|
 ARM="${2:?arm}"
 cd "$(dirname "$0")/.."
 PROJECT_DIR="$PWD"
+SEED_FROM_ENV="${SEED:-}"   # the model cfg sets SEED=0; a caller's SEED must win
 set -a; source "$CFG"; set +a
+[ -n "$SEED_FROM_ENV" ] && SEED="$SEED_FROM_ENV"
 
 GPU="${GPU:-0}"
 PORT="${PORT:-$((8100 + GPU))}"
