@@ -66,7 +66,9 @@ elif [ "${SKIP_APPTAINER:-0}" != "1" ]; then
   export PATH="$DATA_ROOT/apptainer/bin:$PATH" APPTAINER_CACHEDIR="$DATA_ROOT/.cache/apptainer"
   apptainer --version
   SB="$TMPDIR/apptainer_selftest"; rm -rf "$SB"
-  apptainer build --sandbox "$SB" docker://alpine:3.19 >/dev/null
+  # glibc image on purpose: apptainer binds the host's fakeroot/faked (glibc) into the
+  # container, which fails on musl images like alpine. SWE-bench images are Ubuntu.
+  apptainer build --sandbox "$SB" docker://ubuntu:22.04 >/dev/null
   # exactly how mini-swe-agent's singularity env runs every command
   apptainer exec --contain --cleanenv --fakeroot --writable "$SB" sh -c 'touch /probe && echo APPTAINER_OK'
   rm -rf "$SB"
