@@ -1029,3 +1029,19 @@ Do this after the Klone scoring and the first dumpling runs have been pushed, no
 - Launched: tmux `gpu0` = none/acm × seeds 1–3, `gpu1` = summarize/acm_nudge × seeds 1–3 (64k, 1000 steps).
 - Next: time the first run to size the 128k queue; score each finished run on Klone; watch the
   rate of non-diff submissions.
+
+### Checkpoint — paused Nov 19 2026, 17:10
+
+Running and unattended:
+- **dumpling** tmux `gpu0`: `qwen35-9b-v2_none_s1_dumpling_20261119_170342` (seed 1 confirmed), then acm s1, none s2, acm s2, none s3, acm s3.
+  tmux `gpu1`: `qwen35-9b-v2_summarize_s1_dumpling_20261119_170349`, then acm_nudge s1, summarize/acm_nudge s2, s3.
+  Both GPUs ~42 GB, vLLM ready in 90–100 s. Logs: `logs/queue_gpu{0,1}.log`, `logs/agent_<run>.log`.
+- **Klone**: scoring of the 3531xx sweep (prefetch job, then 60 sliced jobs).
+
+Resume tomorrow:
+1. Klone: when `squeue` is empty, count resolved/infra_fail, `git add --sparse logs/apptainer_eval local-eval-reports`, commit, push.
+   Locally: pull, add 1000-step Pass@1 and the 3rd 64k replicate to report.md, rerun scripts/analyze_a2_a3.py.
+2. dumpling: progress per run (count `*/memory_trace.json` out of 99). Time the first finished run to size the 128k queue
+   (none/summarize/acm × seeds 1–3). Commit finished runs with scripts/commit_run.sh and score them on Klone (scripts/score_runs.sh).
+3. Tillicum: commit/push `runs/qwen35-9b-32k_none_353099`, score it on Klone.
+4. Claim tests T1–T4 (vLLM only) once a GPU frees up; repo trim (task card) after the scoring pushes land.
