@@ -1016,3 +1016,16 @@ aggregate tables here; (c) shrinking the clone itself needs a history rewrite
 cluster checkout has unpushed work. Stopgap until then: clone clusters with
 `--filter=blob:none` plus a sparse checkout of what each job needs.
 Do this after the Klone scoring and the first dumpling runs have been pushed, not during them.
+
+## Status (Nov 19 2026, 17:00): dumpling ready, 64k queues launched
+
+- dumpling setup done: vLLM 0.21.0 (both A40s), mini-swe-agent 2.4.6, rootless apptainer 1.5.4 from
+  conda-forge (no rpm2cpio on dumpling; self-test needs a glibc image, not alpine). `APPTAINER_OK`.
+- Bug fixed before launch: model cfg's `SEED=0` overrode the queue's seed (29882a7a).
+- Smoke (astropy-12907, acm, v2, 60 steps): submitted at step 59, token-calib ratio 1.000,
+  harness=v2 / nudge=False / marker_on=True, no compression (peak 51k < 62k). The submitted
+  "patch" was a file snippet, not a diff (model error, one sample). The `No module named 'erfa'`
+  observations also appear in the Tillicum runs of this instance: environment parity, not a dumpling bug.
+- Launched: tmux `gpu0` = none/acm × seeds 1–3, `gpu1` = summarize/acm_nudge × seeds 1–3 (64k, 1000 steps).
+- Next: time the first run to size the 128k queue; score each finished run on Klone; watch the
+  rate of non-diff submissions.
