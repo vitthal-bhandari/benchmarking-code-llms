@@ -50,8 +50,18 @@ if docker info >/dev/null 2>&1; then
   echo "docker works for $USER -> use ENV_CLASS=docker"
 elif [ "${SKIP_APPTAINER:-0}" != "1" ]; then
   if [ ! -x "$DATA_ROOT/apptainer/bin/apptainer" ]; then
-    curl -fsSL https://raw.githubusercontent.com/apptainer/apptainer/main/tools/install-unprivileged.sh \
-      | bash -s - "$DATA_ROOT/apptainer"
+    if command -v rpm2cpio >/dev/null && command -v cpio >/dev/null; then
+      curl -fsSL https://raw.githubusercontent.com/apptainer/apptainer/main/tools/install-unprivileged.sh \
+        | bash -s - "$DATA_ROOT/apptainer"
+    else
+      # No rpm2cpio on dumpling (and no root to install it): take the non-setuid
+      # apptainer from conda-forge instead, via a user-space micromamba.
+      MM="$DATA_ROOT/.local/bin/micromamba"
+      if [ ! -x "$MM" ]; then
+        curl -fsSL https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj -C "$DATA_ROOT/.local" bin/micromamba
+      fi
+      MAMBA_ROOT_PREFIX="$DATA_ROOT/.mamba" "$MM" create -y -p "$DATA_ROOT/apptainer" -c conda-forge apptainer
+    fi
   fi
   export PATH="$DATA_ROOT/apptainer/bin:$PATH" APPTAINER_CACHEDIR="$DATA_ROOT/.cache/apptainer"
   apptainer --version
