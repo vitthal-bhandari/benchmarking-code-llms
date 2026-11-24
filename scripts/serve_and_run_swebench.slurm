@@ -303,6 +303,7 @@ echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS 
     # passed through --export is truncated to its FIRST id (silent n=1 runs).
     # INSTANCE_FILE keeps the commas out of --export entirely.
     MEM_ID_ARGS=()
+    MARKER_ARGS=(); [ "${MARKER_ALL_ARMS:-0}" = "1" ] && MARKER_ARGS=(--marker-all-arms)
     if [ -n "${INSTANCE_FILE:-}" ]; then
       MEM_ID_ARGS=(--instance-ids-file "$INSTANCE_FILE")
     elif [ -n "${INSTANCE_IDS:-}" ]; then
@@ -314,7 +315,7 @@ echo ">>> [driver] Model: $AGENT_MODEL_NAME | Slice: $SLICE | Workers: $WORKERS 
       -c swebench.yaml -c "$API_OVERRIDE" \
       --subset verified --split test --slice "$SLICE" "${MEM_ID_ARGS[@]}" \
       --environment-class singularity --workers "$WORKERS" \
-      --memory-policy "$MEMORY_POLICY" \
+      --memory-policy "$MEMORY_POLICY" --harness "${HARNESS:-v1}" "${MARKER_ARGS[@]}" \
       --context-cap "${CONTEXT_CAP:-32000}" \
       --summarize-at "${SUMMARIZE_AT:-28000}" \
       --keep-last-k "${KEEP_LAST_K:-6}" \

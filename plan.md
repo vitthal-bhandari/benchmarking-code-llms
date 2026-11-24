@@ -1045,3 +1045,26 @@ Resume tomorrow:
    (none/summarize/acm × seeds 1–3). Commit finished runs with scripts/commit_run.sh and score them on Klone (scripts/score_runs.sh).
 3. Tillicum: commit/push `runs/qwen35-9b-32k_none_353099`, score it on Klone.
 4. Claim tests T1–T4 (vLLM only) once a GPU frees up; repo trim (task card) after the scoring pushes land.
+
+## Revision (Nov 23 2026): Tillicum credits are back; split the sweep
+
+Facts that drive it:
+- Tillicum: per-user budget $750, $308 used ($442 left, ends 2027-05-23, enforced). The account
+  averages ~$0.59 per GPU-hour, so one 1000-step run (9–12 h on an H200) costs about $6–8.
+- dumpling is ~2–3× slower: 64k `none` s1 took 15 h, `summarize` s1 ~32 h. GPU 1's six-run queue would take ~8 days.
+- The old 12 h wall limit, not the harness, broke two 1000-step runs: `qwen35-9b_summarize_353103`
+  (48 Timeouts, 5/62, invalid) and `qwen35-9b-128k_acm_353107` (93/99). v2 Tillicum jobs now get 24 h.
+
+Split:
+- **dumpling**: finish seed 1 of the four 64k arms (none s1 done, acm s1 + summarize s1 running, acm_nudge s1 next),
+  then stop the queues. Afterwards: claim tests T1–T4 (vLLM only) and on-demand scoring (no scheduler).
+- **Tillicum** (v2, 1000 steps, 24 h): 64k seeds 2–3 × {none, summarize, acm, acm_nudge} = 8 runs,
+  128k seeds 1–3 × {none, summarize, acm} = 9 runs. ~17 runs ≈ $100–150.
+- Hardware caveat: 64k seed 1 is A40, seeds 2–3 are H200. Same vLLM/harness versions; treat hardware
+  as one more source of sampling noise and check that seed 1 is not an outlier.
+- Scoring: Klone stays the default for big batches; dumpling scores single runs on demand
+  (scripts/run_apptainer_eval.slurm runs under plain bash with EVAL_SCRATCH set), after a 1-instance smoke.
+
+Launcher changes (launch_arms.sh / serve_and_run_swebench.slurm): env SEED wins over the cfg's SEED=0,
+HARNESS and MARKER_ALL_ARMS are forwarded, v2 gives every arm SUMMARIZE_AT, output dirs
+`runs/<tag>-v2_<arm>_s<seed>_tillicum_<jobid>`, `--time` 24 h for v2 (TIME_LIMIT overrides).
