@@ -627,3 +627,58 @@ explain. Likely contributors, all addressed in harness v2: we never told the mod
 context window; one-line guidance instead of ACM's strategy block; markers stamped on
 every observation; tool replies that make the model restart. Also untested: task domain
 and the bash-only scaffold. Full audit: `docs/acm_vs_ours.md`.
+
+---
+
+## B2 at 1000 steps, Qwen3.5-9B, 32k / 64k / 128k (runs 3530xx-3531xx + dumpling, Nov 25 2026)
+
+Same 99 instances as the cap sweep, step limit raised from 250 to 1000. One run per
+cell (seed 0) unless noted. Harness v1 except the last table. Scored on Klone with
+the local swebench harness, 0 infra failures in every run.
+
+| budget | A1 none | A2 summarize | A3 acm |
+|---|--:|--:|--:|
+| 32k  | **4** / 99 | 41 / 99 | 33 / 99 |
+| 64k  | 19 / 99 | *invalid* (62/99, 12 h wall) | 50 / 99 |
+| 128k | 43 / 99 | **48** / 99 | 47 / **93** |
+
+Run ids: 32k 353099 / 353100 / 353101, 64k 353102 / 353103 / 353104, 128k 353105 /
+353106 / 353107.
+- 64k A2 (353103) hit the 12 h Slurm limit before 37 instances finished. Do not use it.
+- 128k A3 (353107) is missing 6 instances for the same reason, so 47 is out of 93
+  (at most 53/99 even if all 6 had passed).
+- v1 A3 always includes the compress nudge (3 nudges, then STOP), so 64k A3 = 50 is
+  "A3 with nudge", not ACM default.
+
+**Why A1 is so low at 32k and 64k.** Harness v1 has no graceful stop for A1, so when
+the context fills, the episode crashes with an empty patch.
+
+| run | Submitted | ContextWindowExceeded (empty patch) | resolved |
+|---|--:|--:|--:|
+| 32k A1 | 4 | 95 | 4 |
+| 64k A1 | 31 | 68 | 19 |
+
+At 32k, A1 resolved every instance it submitted. It almost never got far enough to
+submit. This is the "A1 without a graceful stop" caveat from the faithfulness audit.
+
+### Harness v2 answers the "graceful stop" question (dumpling, seed 1)
+
+`qwen35-9b-v2_none_s1_dumpling_20261119_170342` is A1 at 64k under harness v2. At 95%
+of the window, v2 sends STOP as ACM does. If the model does not submit in that turn, the
+harness submits `git diff`.
+
+| 64k A1 | crashes | stopped at 95% (forced submit) | resolved |
+|---|--:|--:|--:|
+| v1, Tillicum H200, seed 0 (353102) | 68 | n/a | **19** |
+| v2, dumpling A40, seed 1 | 0 | 51 (7 of them resolved) | **31** |
+
+1. **A graceful stop is worth about +12 instances for A1 at 64k (19 → 31).**
+   - 7 come directly from forced submits. Those diffs would have been thrown away in v1.
+   - The rest come from runs that submitted normally (24 of 48 resolved).
+   - So roughly half of the v1 A1 → memory-arm gap at 64k was the harness killing
+     A1, not memory helping.
+2. **This is not a hardware comparison.** Harness, seed and GPU all differ between
+   the two rows, so 31 vs 19 cannot separate them. The hardware check needs a v2 run
+   on Tillicum, same seed, which the planned Tillicum sweep provides.
+3. **Every earlier A1 number at 32k/64k is a lower bound** on a fair baseline. The v2
+   sweep (seeds 1-3, all arms) is what the A1-vs-memory comparison should be built on.
