@@ -22,7 +22,13 @@ ARMS=("$@"); [ ${#ARMS[@]} -eq 0 ] && ARMS=(none summarize acm)
 
 [ -f "$CFG" ] || { echo "no such config: $CFG" >&2; exit 1; }
 # shellcheck disable=SC1090
+SEED_FROM_ENV="${SEED:-}"   # the model cfg sets SEED=0; a caller's SEED must win
 set -a; source "$CFG"; set +a
+[ -n "$SEED_FROM_ENV" ] && SEED="$SEED_FROM_ENV"
+HARNESS="${HARNESS:-v1}"
+# 1000-step runs at 64k/128k took 9-12 h on one H200 and the old 12 h limit cut two
+# of them short (353103: 48 Timeouts; 353107: 93/99). v2 runs get 24 h by default.
+TIME_LIMIT="${TIME_LIMIT:-$([ "$HARNESS" = v2 ] && echo 24:00:00 || echo 12:00:00)}"
 
 TAG="$(basename "$CFG" .env)"
 WORKERS="${WORKERS:-8}"
@@ -50,7 +56,8 @@ pairs() {
            MAX_NUM_BATCHED_TOKENS MOE_BACKEND ENFORCE_EAGER KV_CACHE_DTYPE \
            TEMPERATURE TOP_P TOP_K MIN_P PRESENCE_PENALTY REPETITION_PENALTY SEED \
            ENABLE_THINKING MAX_TOKENS MAX_MODEL_LEN CONTEXT_CAP KEEP_LAST_K \
-           INSTANCE_FILE INSTANCE_IDS WORKERS SWEBENCH_SIF_DIR RESUME STEP_LIMIT; do
+           INSTANCE_FILE INSTANCE_IDS WORKERS SWEBENCH_SIF_DIR RESUME STEP_LIMIT \
+           HARNESS MARKER_ALL_ARMS; do
     [ -n "${!v:-}" ] && out="${out},${v}=${!v}"
   done
   printf '%s' "$out"
@@ -61,15 +68,21 @@ for ARM in "${ARMS[@]}"; do
   # SUMMARIZE_AT only means anything for A2; keep it out of the other arms so
   # their logged config isn't misleading.
   [ "$ARM" = "summarize" ] && [ -n "${SUMMARIZE_AT:-}" ] && EXTRA=",SUMMARIZE_AT=${SUMMARIZE_AT}"
+  # v2: the 95% threshold also drives STOP in A1/A3, so every arm gets it.
+  [ "$HARNESS" = "v2" ] && [ -n "${SUMMARIZE_AT:-}" ] && EXTRA=",SUMMARIZE_AT=${SUMMARIZE_AT}"
   # An explicitly supplied OUTPUT_DIR wins, so RESUME=1 can top up an existing
   # run. Previously this always overwrote it, which silently sent a resume into a
   # brand-new directory instead of the one being resumed.
-  OUT="${OUTPUT_DIR:-runs/${TAG}_${ARM}${SMOKE}}"
+  if [ "$HARNESS" = "v2" ]; then
+    OUT="${OUTPUT_DIR:-runs/${TAG}-v2_${ARM}_s${SEED}_tillicum${SMOKE}}"   # slurm appends _<jobid>
+  else
+    OUT="${OUTPUT_DIR:-runs/${TAG}_${ARM}${SMOKE}}"
+  fi
   EXPORTS="ALL$(pairs),MEMORY_POLICY=${ARM},OUTPUT_DIR=${OUT}${EXTRA}"
   if [ -n "${DRY:-}" ]; then
-    echo "sbatch --account=stf --export=${EXPORTS} scripts/serve_and_run_swebench.slurm"
+    echo "sbatch --account=stf --time=${TIME_LIMIT} --export=${EXPORTS} scripts/serve_and_run_swebench.slurm"
   else
     echo ">>> submitting ${TAG} / ${ARM}"
-    sbatch --account=stf --export="${EXPORTS}" scripts/serve_and_run_swebench.slurm
+    sbatch --account=stf --time="${TIME_LIMIT}" --export="${EXPORTS}" scripts/serve_and_run_swebench.slurm
   fi
 done

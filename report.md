@@ -491,3 +491,194 @@ Pass@1 pending Klone scoring; submissions and trajectory metrics below.
    vs 100% at 32k (n=2), 47-54% vs 58% at 64k, 45-53% vs 56% at 128k. They
    rescue harder instances, so per-submission quality falls while total resolved
    rises. This is the same selection effect seen in the 64k 3-model run.
+
+---
+
+## A2 vs A3: harness effect or noise? (Nov 18 2026)
+
+Question from the advisor meeting: A3 is almost never proactive (0 voluntary
+compressions at 32k/64k; 2 instances at 128k), so in practice it is "A2 with a
+different prompt". Why do the two arms score differently, and is the gap caused
+by the harness or by chance? Script: `scripts/analyze_a2_a3.py` (no GPU; reads
+`runs/` and `logs/apptainer_eval/`).
+
+### What actually differs between the arms (from `scripts/memory_agent.py`)
+The trigger is matched: A2 compresses at projected 62,259 tokens (0.95 × 64k),
+and A3 nudges at the same raw count. Everything else differs:
+
+| | A2 summarize | A3 acm |
+|---|---|---|
+| Prompt | stock mini-swe-agent | + ACM system addendum, + 2 tool schemas, + `[CURRENT CONTEXT TOKEN: N]` after **every** observation |
+| Who compresses | harness, unconditionally | model, after a nudge (complies ~90%); 3 nudges, then STOP_PROMPT |
+| What survives | last ≤3 turns verbatim + one summary that is **re-summarised** each time (range always starts at msg 2) | nothing verbatim; summaries **stack** (range starts after the previous summary) |
+| Context after compression (median, Qwen 64k) | 4,542 tok | 3,429 tok |
+| Failure path | none (0 OOC) | nudge refused or too late → OOC death (3 at 64k, **26 at 32k**) |
+
+So "A2 + 4 proactive calls" is not quite right. A3 differs from A2 in its
+prompt on every step, and in its compression mechanics whenever compression fires.
+
+### Finding 1: two runs of the *same* arm disagree as much as A2 and A3 do
+Qwen3.5-9B 64k was run twice per arm with the same model, sampling (temp 0.6, seed 0)
+and budget: 344xx (step limit 250) and 350xx (500).
+
+| arm | run 1 | run 2 | instances that flip | McNemar p |
+|---|--:|--:|--:|--:|
+| A1 none | 0.172 | 0.192 | 14 / 99 (14%) | 0.79 |
+| A2 summarize | 0.374 | 0.364 | 31 / 99 (31%) | 1.00 |
+| A3 acm | 0.303 | 0.384 | 28 / 99 (28%) | 0.18 |
+
+Restricting to instances where the 250-step limit did not bind in either run
+leaves the flip rate at 26–28%. The identical A2 config then even shows a
+"significant" gap (28 vs 20 of 43, p = 0.04). A3's own rerun moved Pass@1 by
+**+0.081**, more than any Qwen A2–A3 gap at 64k. Same-seed reruns also diverge
+quickly: only 75–88% of rerun pairs issue the same first command, because vLLM
+batching is not bit-deterministic across runs.
+
+### Finding 2: A2 vs A3 per cell, split by whether compression ever fired
+
+| cell | A2 | A3 | A3−A2 [95% CI] | p | never-compressed n: A2 vs A3 | compressed n: A2 vs A3 |
+|---|--:|--:|---|--:|---|---|
+| Qwen 64k s250 | 37 | 30 | −0.071 [−0.18, +0.04] | 0.28 | 17: 13 vs 13 | 82: 24 vs 17 |
+| Qwen 64k s500 | 36 | 38 | +0.020 [−0.09, +0.12] | 0.85 | 25: 16 vs 14 | 74: 20 vs 24 |
+| Qwen 32k s500 | 36 | 27 | **−0.091** [−0.17, −0.01] | 0.05 | 0 | 99: 36 vs 27 |
+| Qwen 128k s500 | 39 | 43 | +0.040 [−0.06, +0.14] | 0.57 | 73: 35 vs 36 | 26: 4 vs 7 |
+| MiMo 64k s250 | 21 | 26 | +0.051 [−0.06, +0.16] | 0.46 | 23: 14 vs 12 | 76: 7 vs 14 |
+| Gemma 64k s250 | 27 | 38 | **+0.111** [+0.03, +0.19] | 0.01 | 50: 24 vs 29 | 49: 3 vs 9 |
+
+- **Qwen at 64k and 128k: the gap is noise.** It flips sign between the two 64k
+  runs (−0.071, then +0.020), and both values sit inside the same-arm rerun spread.
+  The earlier claim in this report ("A3 beats A2 on two of three models… that
+  difference is mechanism only") is **withdrawn**; one run per arm cannot support it.
+- **Qwen at 32k: a real mechanism effect, favouring A2.** Every instance
+  compresses (~8 times each), and A3 loses 26 instances to context overflow
+  against A2's 1. The cause is the fallback: a nudge can be refused, a forced
+  compression cannot.
+- **Gemma at 64k is the one candidate for a harness effect favouring A3** (14 instances
+  won only by A3, 3 won only by A2). Part of the gain is on instances that never
+  compressed (24 vs 29), so the prompt rather than the mechanism would be
+  responsible. Gemma is also the only model that reacts to the marker: in 0.84% of
+  its pre-nudge turns it copies `[CURRENT CONTEXT TOKEN: N]` into its own output.
+  There is no Gemma rerun, so we cannot yet tell this apart from noise.
+
+### Finding 3: the prompt changes the trajectory immediately, but not the outcome
+| pair (Qwen 64k) | same first command | same first 5 commands |
+|---|--:|--:|
+| A1 vs A1 rerun | 88% | 48% |
+| A2 vs A2 rerun | 79% | 40% |
+| A3 vs A3 rerun | 75% | 30% |
+| A1 vs A2 (identical prompt) | 82% | 43% |
+| **A2 vs A3 (different prompt)** | **51%** | **6%** |
+
+A1 and A2 share a prompt and look like reruns of each other until the first
+compression. A3's prompt sends half the trajectories somewhere else on step 1.
+The 28 discordant instances at 64k s500 show this: several A3 "wins" are
+instances where A2 hit the step limit after 6–7 compressions while A3 found a
+different path and submitted in about 100 steps **without compressing at all**
+(django-11179, -11119, -11551). This is path divergence, not memory management.
+
+### Finding 4: Qwen does not notice its own context
+Before the first nudge, 0 of 12,107 Qwen A3 turns at 64k (and 0 of 19,566 at
+128k) reason about context, tokens or `manage_context`. The 5–9 regex hits are
+all Django's `Context` class. The marker and tools are present but never
+considered, so proactivity has no chance to emerge without a change to the
+prompt or training.
+
+### Conclusions for the advisor
+1. On Qwen the A2–A3 Pass@1 difference is **within run-to-run noise** at 64k
+   and 128k. It is neither a harness effect nor a proactivity effect.
+2. Where the arms do differ reliably, the cause is the **fallback mechanism**
+   (32k: nudge vs forced compression), not proactivity.
+3. The A3 prompt changes behaviour (trajectories diverge on step 1) without
+   changing the outcome distribution, which is consistent with a model that
+   ignores the extra affordance.
+4. **Methodological consequence:** single runs on 99 instances cannot resolve
+   differences under about ±0.10 between arms. Arm comparisons need seeds
+   (≥3) or more instances, plus paired tests. This applies to every arm table
+   reported so far.
+
+### Faithfulness audit against the ACM repo (Nov 18 2026)
+Source read: github.com/lixiaochuan2020/agentic-context-management @ f06f90e
+(`src/runner.py`, `history.py`, `prompts.py`, `tools.py`, `client.py`, configs).
+This resolves the Sep "open faithfulness question".
+
+| behaviour | ACM (default eval config) | ours | effect |
+|---|---|---|---|
+| A3 at 95% | straight to **STOP** (final answer, episode ends); the compress nudge fires only in `min_turns` / continue modes, up to 10× | 3 compress nudges, then STOP | almost all of our A3 compressions are nudge-driven, which ACM default would never produce. This is why our A3 behaves like A2 |
+| ReAct baseline at 95% | **STOP** → final answer | none; dies with `ContextWindowExceededError` and an **empty patch** (97/97 at 32k, 65/65 at 64k) | our A1 is harsher than ACM's baseline, which inflates the memory benefit at 32k/64k |
+| harness compression at 95% | never | never (A3) | consistent: ACM never compresses for the model |
+| token marker | appended only to the **latest** tool message, in a copy (not stored) | appended to **every** observation, permanently | stale markers pile up in our context |
+| `manage_context` range | since last boundary, **including** the calling turn; summaries stack | since last call, excluding the calling turn; summaries stack | minor |
+| tool reply | the summary text itself: `[summary_id: N] <memory…>` | "compressed N messages, freed ~X tokens. Continue working." with the summary inserted earlier as a user message | plausibly drives A3's 95% "Let me start…" restarts |
+| summarizer input | `[role] content`; tool calls dropped, reasoning kept (inline `<think>`, no reasoning parser) | `[role] content`; tool calls **and** reasoning dropped (our vLLM uses a reasoning parser, so `content=None`) | our summaries see strictly less than ACM's |
+| query_memory | LLM-extracted answer | LLM-extracted answer | same |
+| max_tokens | 16,384 | 8,192 | deliberate (small caps) |
+| sampling | vLLM/model defaults | temp 0.6, top_p 0.95, top_k 20 (Qwen's recommended values) | probably equivalent |
+
+Caveats: ACM released only BrowseComp-Plus code, so which mode produced their
+SWE-bench Base number is unknown. All existing A1 numbers at 32k/64k should be read
+as "A1 without a graceful stop"; how many of those deaths would score with a
+STOP-and-submit is unknown until we rerun.
+
+**Correction (paper, Fig. 4):** the near-zero memory-tool use there is GPT-5.5.
+Untrained Qwen3.5-9B under ACM's harness calls `manage_context` 2.1× and
+`query_memory` 0.6× per BrowseComp-Plus question, with no nudge (the nudge is scaling-mode
+only). Our "0 voluntary" is therefore *not* a reproduction of ACM. It is a gap to
+explain. Likely contributors, all addressed in harness v2: we never told the model its
+context window; one-line guidance instead of ACM's strategy block; markers stamped on
+every observation; tool replies that make the model restart. Also untested: task domain
+and the bash-only scaffold. Full audit: `docs/acm_vs_ours.md`.
+
+---
+
+## B2 at 1000 steps, Qwen3.5-9B, 32k / 64k / 128k (runs 3530xx-3531xx + dumpling, Nov 25 2026)
+
+Same 99 instances as the cap sweep, step limit raised from 250 to 1000. One run per
+cell (seed 0) unless noted. Harness v1 except the last table. Scored on Klone with
+the local swebench harness, 0 infra failures in every run.
+
+| budget | A1 none | A2 summarize | A3 acm |
+|---|--:|--:|--:|
+| 32k  | **4** / 99 | 41 / 99 | 33 / 99 |
+| 64k  | 19 / 99 | *invalid* (62/99, 12 h wall) | 50 / 99 |
+| 128k | 43 / 99 | **48** / 99 | 47 / **93** |
+
+Run ids: 32k 353099 / 353100 / 353101, 64k 353102 / 353103 / 353104, 128k 353105 /
+353106 / 353107.
+- 64k A2 (353103) hit the 12 h Slurm limit before 37 instances finished. Do not use it.
+- 128k A3 (353107) is missing 6 instances for the same reason, so 47 is out of 93
+  (at most 53/99 even if all 6 had passed).
+- v1 A3 always includes the compress nudge (3 nudges, then STOP), so 64k A3 = 50 is
+  "A3 with nudge", not ACM default.
+
+**Why A1 is so low at 32k and 64k.** Harness v1 has no graceful stop for A1, so when
+the context fills, the episode crashes with an empty patch.
+
+| run | Submitted | ContextWindowExceeded (empty patch) | resolved |
+|---|--:|--:|--:|
+| 32k A1 | 4 | 95 | 4 |
+| 64k A1 | 31 | 68 | 19 |
+
+At 32k, A1 resolved every instance it submitted. It almost never got far enough to
+submit. This is the "A1 without a graceful stop" caveat from the faithfulness audit.
+
+### Harness v2 answers the "graceful stop" question (dumpling, seed 1)
+
+`qwen35-9b-v2_none_s1_dumpling_20261119_170342` is A1 at 64k under harness v2. At 95%
+of the window, v2 sends STOP as ACM does. If the model does not submit in that turn, the
+harness submits `git diff`.
+
+| 64k A1 | crashes | stopped at 95% (forced submit) | resolved |
+|---|--:|--:|--:|
+| v1, Tillicum H200, seed 0 (353102) | 68 | n/a | **19** |
+| v2, dumpling A40, seed 1 | 0 | 51 (7 of them resolved) | **31** |
+
+1. **A graceful stop is worth about +12 instances for A1 at 64k (19 → 31).**
+   - 7 come directly from forced submits. Those diffs would have been thrown away in v1.
+   - The rest come from runs that submitted normally (24 of 48 resolved).
+   - So roughly half of the v1 A1 → memory-arm gap at 64k was the harness killing
+     A1, not memory helping.
+2. **This is not a hardware comparison.** Harness, seed and GPU all differ between
+   the two rows, so 31 vs 19 cannot separate them. The hardware check needs a v2 run
+   on Tillicum, same seed, which the planned Tillicum sweep provides.
+3. **Every earlier A1 number at 32k/64k is a lower bound** on a fair baseline. The v2
+   sweep (seeds 1-3, all arms) is what the A1-vs-memory comparison should be built on.

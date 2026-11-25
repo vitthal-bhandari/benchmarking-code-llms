@@ -41,7 +41,7 @@ from minisweagent.run.benchmarks.swebench import (
 from minisweagent.utils.serialize import recursive_merge
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_agent import MemoryAgent, ACM_SYSTEM_ADDENDUM  # noqa: E402
+from memory_agent import MemoryAgent, build_system_addendum  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("run_memory")
@@ -118,7 +118,12 @@ def main():
     ap.add_argument("-c", "--config", action="append", default=[])
     ap.add_argument("--environment-class", default="singularity")
     # memory knobs
-    ap.add_argument("--memory-policy", choices=["none", "summarize", "acm"], default="none")
+    ap.add_argument("--memory-policy", choices=["none", "summarize", "acm", "acm_nudge"], default="none")
+    ap.add_argument("--harness", choices=["v1", "v2"], default=os.environ.get("HARNESS", "v1"),
+                    help="v1 = all runs before Nov 18 2026; v2 = ACM-faithful (docs/acm_vs_ours.md)")
+    ap.add_argument("--marker-all-arms", action="store_true",
+                    default=os.environ.get("MARKER_ALL_ARMS", "0") == "1",
+                    help="v2: show A1/A2 the [CURRENT CONTEXT TOKEN] marker too, as ACM's ReAct gets it")
     ap.add_argument("--context-cap", type=int, default=32000)
     ap.add_argument("--summarize-at", type=int, default=28000)
     ap.add_argument("--keep-last-k", type=int, default=6)
@@ -154,18 +159,25 @@ def main():
     config.setdefault("agent", {})
     if args.environment_class:
         config.setdefault("environment", {})["environment_class"] = args.environment_class
-    # A3: append the ACM memory instructions to the system prompt
-    if args.memory_policy == "acm":
-        config["agent"]["system_template"] = config["agent"].get("system_template", "") + ACM_SYSTEM_ADDENDUM
+    if args.memory_policy == "acm_nudge" and args.harness != "v2":
+        ap.error("acm_nudge is a v2 policy; in v1, 'acm' already nudges")
+    # v1: ACM addendum on A3 only. v2: context-window line on every arm, plus
+    # ACM's memory header and strategy on A3 (build_system_addendum).
+    config["agent"]["system_template"] = (config["agent"].get("system_template", "")
+                                          + build_system_addendum(args.memory_policy, args.harness,
+                                                                  args.context_cap))
 
     mem_cfg = {
         "memory_policy": args.memory_policy,
         "context_cap": args.context_cap,
         "summarize_at": args.summarize_at,
         "keep_last_k": args.keep_last_k,
+        "harness": args.harness,
+        "marker_all_arms": args.marker_all_arms,
     }
-    log.info(f"Running {len(instances)} instances | policy={args.memory_policy} cap={args.context_cap} "
-             f"summarize_at={args.summarize_at} workers={args.workers}")
+    log.info(f"Running {len(instances)} instances | policy={args.memory_policy} harness={args.harness} "
+             f"cap={args.context_cap} summarize_at={args.summarize_at} "
+             f"marker_all_arms={args.marker_all_arms} workers={args.workers}")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(process_instance, inst, out, config, mem_cfg): inst["instance_id"] for inst in instances}
